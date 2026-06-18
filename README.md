@@ -110,7 +110,7 @@ Dev1  Dev2    Sales1 Sales2
 
 ### What Is an Agentic Loop?
 
-An agentic loop is when an AI model doesn't just answer once -- it runs in a **cycle**: think, act, observe, repeat.
+An agentic loop is when an AI model doesn't just answer once - it runs in a **cycle**: think, act, observe, repeat.
 
 **Analogy: A chef cooking a recipe**
 
