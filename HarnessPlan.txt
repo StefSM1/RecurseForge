@@ -1,0 +1,271 @@
+================================================================================
+  See also: LLMRecursionPlan_v2.txt -- The full architectural theory,
+  interface contracts, and phase breakdown for the recursion engine itself.
+================================================================================
+
+The RecurseForge Custom Harness Plan
+=====================================
+
+1. PURPOSE: Why a Custom Harness?
+----------------------------------
+Existing agent harnesses (Kilo Code, OpenClaw, OpenHands, Aider's own CLI)
+are all designed around a single-agent loop: one LLM makes tool calls inside
+a sandbox until the task is done. RecurseForge is fundamentally different:
+
+  - The execution model is a recursive, multi-node graph where sub-agents
+    spawn dynamically (ReDel layer).
+  - Textual gradients flow backward through that graph after every execution
+    (TextGrad layer), requiring a tracing infrastructure that no existing
+    harness provides.
+  - A tiered memory system (L0 / L1 / L2) actively manages VRAM, demoting
+    old context to disk -- this needs hooks into the execution loop that
+    off-the-shelf harnesses do not expose.
+  - Sub-agents communicate via structured JSON execution frames, not
+    conversational chat turns.
+
+Building a thin custom harness gives you full control over these mechanisms
+without fighting an existing framework's abstractions. The harness is
+deliberately "dumb" -- it routes data, monitors resources, and presents
+results. All intelligence lives in the engine.
+
+
+2. HARNESS COMPONENTS
+----------------------
+
+2a. CLI Orchestrator (harness/cli.py)
+  The entry point for every run. A Python CLI (argparse or click) that:
+    - Accepts a task description from the command line or a YAML task file.
+    - Instantiates the LangGraph StateGraph from engine/graph.py.
+    - Injects the task into the graph state and calls graph.invoke().
+    - Supports sub-commands:
+        run    -- execute a full task end-to-end
+        step   -- advance the graph one state transition (for debugging)
+        status -- print the current graph state and active nodes
+        abort  -- send an ABORT command and clean up sandboxes
+    - Emits structured logs (JSON lines) that the dashboard can consume.
+    - On completion, prints a summary: nodes spawned, tokens used, gradients
+    computed, final output.
+
+2b. JSON Frame Protocol (engine/interfaces.py)
+  Pydantic v2 models that define every message flowing through the system.
+  These are the shared contracts referenced by both the engine and harness.
+
+  Core models (see LLMRecursionPlan_v2.txt for full field definitions):
+    - GraphState       : the outer LangGraph state object
+    - NodeFrame        : a single sub-agent's task + result
+    - ContextRequest   : sub-agent asking the repo-map for code
+    - ContextPayload   : repo-map server's reply
+    - ExecutionResult  : sandbox output after running agent code
+    - TextGradient     : structured critique from TextGrad
+    - HarnessCommand   : CLI -> engine control signal
+    - EngineEvent      : engine -> harness telemetry signal
+
+  Every model has a .to_json() and .from_json() method for serialization
+  across process boundaries. The protocol is versioned (a schema_version
+  field on every model) so you can evolve it without breaking old logs.
+
+2c. Sandbox Executor Pool (harness/sandbox.py)
+  A process manager that runs sub-agent code in isolation.
+
+  Design:
+    - Maintains a pool of N pre-warmed subprocess workers (default N=4).
+    - Each worker is a Python subprocess with a restricted environment:
+      limited imports, no network access, capped memory (ulimit / cgroups).
+    - When a NodeFrame reaches the "Execute" state, the orchestrator sends
+      the code to an idle worker.
+    - The worker executes, captures stdout/stderr/exit_code, and returns
+      an ExecutionResult.
+    - Timeout: configurable per-task (default 30 seconds). Kills the
+      subprocess on timeout and returns exit_code=-1.
+    - Workers are recycled after every execution to prevent state leakage.
+
+  Why not Docker?
+    Docker adds startup latency (~500ms per container) and complexity.
+    For a local 8GB GPU machine, restricted subprocesses are faster and
+    simpler. Docker support can be added later as an optional backend.
+
+2d. VRAM Monitor Daemon (harness/vram_monitor.py)
+  A background thread that watches GPU memory and triggers the tiered
+  memory manager.
+
+  Design:
+    - Polls GPU memory every 2 seconds using pynvml (NVIDIA) or
+      torch.cuda.mem_get_info() (fallback).
+    - Two thresholds configured in config.yaml:
+        warning_threshold_mb  : 6000  (75% of 8GB)
+        critical_threshold_mb : 7500  (94% of 8GB)
+    - On WARNING: emits a VRAM_ALERT EngineEvent. The context layer
+      (context/vram_manager.py) responds by demoting L1 data to L2
+      (serializing tree-sitter representations to disk as markdown).
+    - On CRITICAL: forcefully evicts the oldest sub-agent's L0 context
+      from memory, replacing it with a one-sentence summary.
+    - Logs every intervention with timestamps for post-mortem analysis.
+
+2e. Repo-Map Server (context/repo_map.py)
+  A standalone FastAPI service that parses the target codebase and serves
+  surgical code lookups to sub-agents.
+
+  Design:
+    - On startup, runs tree-sitter over the target directory to build an
+      AST index. Stores it in an in-memory dict keyed by file path.
+    - Exposes three endpoints:
+        GET  /map
+          Returns the full repository map (class names, function signatures,
+          variable declarations) as XML-packed text, optimized for ~1024
+          tokens (Repomix-style).
+        POST /lookup
+          Body: ContextRequest JSON.
+          Returns: ContextPayload JSON with the exact code fragment.
+        POST /refresh
+          Re-parses the codebase (useful after agents modify files).
+    - Token counting uses tiktoken to ensure ContextPayloads never exceed
+      the requesting agent's budget.
+    - Caches parse results; invalidates on file modification timestamps.
+
+2f. Gradient Log Viewer (harness/dashboard.py)
+  A Streamlit app for visualizing the execution tree and debugging
+  TextGrad flows.
+
+  Design:
+    - Reads EngineEvent logs (JSON lines from the CLI orchestrator).
+    - Visualizations:
+      1. Execution Tree: interactive graph showing parent->child node
+      relationships, color-coded by status (running / success / failed).
+      2. Gradient Flow: arrows showing which TextGradient flowed from
+      which node to which node, with severity and mutation details on
+      hover.
+      3. VRAM Timeline: line chart of GPU memory usage over time, with
+      markers showing when L0/L1/L2 demotions occurred.
+      4. Per-Node Inspector: click any node to see its system prompt,
+      task, code output, execution result, and gradient received.
+    - Runs locally on localhost:8501. Not intended for production -- this
+    is a development debugging tool.
+
+
+3. CONNECTION TO THE RECURSION ENGINE
+--------------------------------------
+The harness and the engine are separate concerns with a clean boundary.
+
+  Launching the engine:
+    1. The CLI orchestrator (harness/cli.py) imports engine/graph.py and
+    constructs a LangGraph StateGraph.
+    2. It creates a GraphState with the user's task and config.
+    3. It calls graph.invoke(initial_state) which begins the state machine:
+    Init -> Plan -> Execute -> Validate -> Done.
+    4. Inside the Plan state, the ReDel layer may spawn child NodeFrames.
+    The graph routes these to Execute, where the sandbox pool picks them up.
+    5. After execution, TextGrad evaluates results and emits TextGradients.
+    LangGraph routes these back to the originating nodes.
+
+  Event flow:
+    - At every significant moment, the engine emits an EngineEvent onto the
+    event bus (harness/event_bus.py).
+    - The event bus is a Python queue.Queue (for threaded mode) or an
+    asyncio.Queue (for async mode).
+    - Subscribers:
+      * The dashboard reads events to update its visualizations.
+      * The VRAM monitor reads NODE_SPAWN and NODE_COMPLETE events to
+      correlate memory spikes with agent activity.
+      * The CLI orchestrator reads events for its JSON-lines log output.
+
+  The separation rule:
+    The harness NEVER imports or calls any LLM inference code. It does not
+    know what model is running, how prompts are constructed, or how gradients
+    are computed. It only:
+      - launches the engine
+      - routes data between engine and external consumers (sandbox, dashboard)
+      - monitors hardware resources
+      - presents results
+
+  This means you can swap the engine's model (Qwen 3.5 9B today, something
+  else tomorrow) without changing a single line of harness code.
+
+
+4. FILE STRUCTURE
+------------------
+
+  RecurseForge/
+  |
+  +-- engine/                      # The recursion engine
+  |   +-- graph.py                 # LangGraph StateGraph definition
+  |   |                            #   States: Init, Plan, Execute, Validate, Done
+  |   |                            #   Transitions, routing logic, graph.invoke()
+  |   +-- redel.py                 # Task decomposition / node spawning
+  |   |                            #   Root agent decides when to delegate
+  |   |                            #   Spawns NodeFrame children, enforces max_depth
+  |   +-- textgrad.py              # Textual backpropagation engine (Phase 3)
+  |   |                            #   Loss computation, gradient generation
+  |   |                            #   Dynamic graph traversal for backprop
+  |   +-- interfaces.py            # All Pydantic models (shared contracts)
+  |                                #   GraphState, NodeFrame, ContextRequest,
+  |                                #   ContextPayload, ExecutionResult,
+  |                                #   TextGradient, HarnessCommand, EngineEvent
+  |
+  +-- context/                     # Context optimization layer
+  |   +-- repo_map.py              # Tree-sitter repo map server (FastAPI)
+  |   |                            #   AST parsing, XML packing, /map + /lookup
+  |   +-- vram_manager.py          # L0 / L1 / L2 tiered memory manager
+  |                                #   Demotion/promotion logic, serialization
+  |
+  +-- harness/                     # The custom harness
+  |   +-- cli.py                   # CLI orchestrator (argparse entry point)
+  |   +-- sandbox.py               # Sandbox executor pool (subprocess workers)
+  |   +-- vram_monitor.py          # VRAM monitor daemon (pynvml polling)
+  |   +-- event_bus.py             # Engine-harness event bus (queue.Queue)
+  |   +-- dashboard.py             # Gradient log viewer (Streamlit app)
+  |
+  +-- config.yaml                  # Global configuration
+  |                                #   model_path, vram_warning_mb,
+  |                                #   vram_critical_mb, max_depth,
+  |                                #   sandbox_pool_size, sandbox_timeout_s
+  |
+  +-- LLMRecursionPlan_v2.txt      # Architecture theory + phase plan
+  +-- HarnessPlan.txt              # This file
+
+
+5. BUILD ORDER
+---------------
+Follow this sequence to always have something runnable at every step:
+
+  Step 1: interfaces.py
+    Write all Pydantic models first. This is the shared contract that
+    every other file imports. Takes ~1 hour. Test by instantiating each
+    model and serializing to JSON.
+
+  Step 2: harness/cli.py + engine/graph.py (Phase 1 skeleton)
+    Build the CLI entry point and a minimal LangGraph state machine that
+    goes Init -> Plan -> Execute -> Validate -> Done with a hardcoded
+    task (no LLM yet, just print statements at each state). This proves
+    the harness-engine wiring works. Takes ~2-3 hours.
+
+  Step 3: engine/redel.py
+    Wire up the Root Agent (Qwen 3.5 9B) inside the Plan state. Implement
+    the spawn logic that creates NodeFrame children. Add max_depth
+    enforcement. Test with a simple task that requires 2 levels of
+    delegation.
+
+  Step 4: context/repo_map.py + context/vram_manager.py (Phase 2)
+    Build the tree-sitter parser, the FastAPI endpoints, and the L0/L1/L2
+    manager. Test by pointing it at a small codebase and verifying token
+    counts stay under budget.
+
+  Step 5: harness/sandbox.py + harness/vram_monitor.py + harness/event_bus.py
+    Build the sandbox pool, wire it to the Execute state, and start the
+    VRAM monitor daemon. Test by executing generated Python code and
+    watching memory usage in the terminal.
+
+  Step 6: engine/textgrad.py (Phase 3 -- the hard math)
+    Implement the textual autograd engine. Build the dynamic graph tracer
+    that walks the execution tree backward. Implement FedTextGrad-style
+    information density compression for gradients. This is the longest
+    phase -- budget several days and learn as you go.
+
+  Step 7: harness/dashboard.py
+    Build the Streamlit visualization. By this point you will have real
+    execution logs and gradient flows to debug against. This makes
+    debugging Phase 3 issues dramatically easier.
+
+  Step 8: Integration testing and config.yaml tuning
+    Run the full pipeline end-to-end on a real coding task. Tune
+    max_depth, VRAM thresholds, sandbox pool size, and token budgets
+    in config.yaml until the system is stable.

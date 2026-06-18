@@ -1,0 +1,21 @@
+# RecurseForge Configuration
+# ========================
+# Tune these values for your hardware and task complexity.
+
+llm:
+  # llama.cpp server endpoint (OpenAI-compatible API)
+  base_url: "http://localhost:8080/v1"
+  # Model name passed in API requests (llama.cpp accepts any string)
+  model_name: "qwen"
+  # Max tokens the model can generate per call
+  max_tokens: 1024
+  # Lower = more deterministic, higher = more creative
+  temperature: 0.3
+
+recursion:
+  # Maximum depth of recursive sub-agent spawning.
+  # Depth 0 = root agent only. Depth 3 = root + 3 levels of children.
+  # Keep this low on 8GB VRAM -- each level multiplies token cost.
+  max_depth: 3
+  # Maximum number of children any single agent can spawn per level.
+  max_children: 4
