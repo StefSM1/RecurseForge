@@ -144,21 +144,21 @@ Spawning means creating a new, **independent** AI instance to handle a sub-task.
 
 ```
     Teacher: "Grade 30 essays"
-              |
-          Spawns 3 TAs
-              |
-    +---------+---------+
-    |         |         |
-   TA-1      TA-2      TA-3
-   Essays    Essays    Essays
-   1-10      11-20     21-30
-    |         |         |
-    v         v         v
-  Grades    Grades    Grades
-  for 1-10  for 11-20 for 21-30
-    \         |         /
-     \        |        /
-      v       v       v
+                |
+            Spawns 3 TAs
+                |
+    +-----------+-----------+
+    |           |           |
+   TA-1       TA-2       TA-3
+   Essays     Essays     Essays
+   1-10       11-20      21-30
+    |           |           |
+    v           v           v
+  Grades      Grades      Grades
+  for 1-10    for 11-20   for 21-30
+    \           |          /
+     \          |         /
+      v         v        v
     Teacher collects all grades
 ```
 
@@ -277,9 +277,9 @@ Each node is a simple Python function that receives the current state and return
 | Node | What it does |
 |------|-------------|
 | `init_node` | Resets counters, sets status to "planning" |
-| `plan_node` | Calls the LLM with the delegation prompt, parses the response, spawns children or stores the direct answer |
-| `execute_node` | Iterates over each child, sends its task to the LLM, collects results |
-| `validate_node` | Checks if all children succeeded, logs any failures |
+| `plan_node` | Calls the LLM (with thinking disabled for speed), parses the response, spawns children or stores the direct answer. If the answer contains code, runs it in the sandbox |
+| `execute_node` | For each child: fetches repo-map context, calls the LLM, extracts Python code, runs it in the sandbox, retries on failure (up to 2x) |
+| `validate_node` | Checks sandbox results, reports code execution stats and retry counts |
 
 **The routing function** `route_after_plan` is what makes the graph dynamic. After the Plan node runs, it checks: did we spawn children? If yes -> go to Execute. If no -> go to END.
 
@@ -340,6 +340,145 @@ You can combine flags: `--task "..." --verbose --json` runs a task with full deb
 
 ---
 
+### The Sandbox (`sandbox.py`)
+
+The sandbox is a clean room where sub-agents can safely run their generated code.
+
+```
+  Agent generates code
+         |
+         v
+  +------------------+
+  |    SANDBOX       |
+  |                  |
+  | 1. Write code    |
+  |    to temp file  |
+  | 2. Run in fresh  |
+  |    subprocess    |
+  | 3. Capture       |
+  |    stdout/stderr |
+  | 4. Clean up      |
+  +------------------+
+         |
+         v
+  ExecutionResult:
+  {exit_code, stdout, stderr}
+```
+
+Each execution is **isolated** -- the subprocess has a restricted environment (no PYTHONPATH, limited HOME). If the code crashes, loops forever, or does something unexpected, only the temp subprocess is affected. After execution, the temp file is deleted.
+
+**Why not Docker?** Docker adds ~500ms startup latency per container. For our local setup, Python subprocesses are faster and simpler. Docker support can be added later as an optional backend.
+
+---
+
+### The Event Bus (`event_bus.py`)
+
+The event bus is like a bulletin board. When something important happens, the engine pins a note. Anyone who cares reads the board and reacts.
+
+```
+  Engine                    Event Bus                 Subscribers
+  ------                    ---------                 -----------
+  plan_node                 +------------+
+  spawns child  --------->  | NODE_SPAWN |  ------->  Dashboard
+                            +------------+              VRAM Monitor
+                                                       CLI Logger
+ 
+  execute_node              +--------------+
+  child finishes ---------> | NODE_COMPLETE| ------->  Dashboard
+                            +--------------+            CLI Logger
+                           
+  VRAM monitor              +-------------+
+  detects spike --------->  | VRAM_ALERT  | ------->  VRAM Manager
+                            +-------------+            (demotes L1->L2)
+```
+
+The engine doesn't need to know who's reading the notes. It just posts them. This is called **pub/sub** (publish/subscribe) and keeps components loosely connected.
+
+---
+
+### The VRAM Manager (`vram_manager.py`)
+
+Manages context data across three tiers, like a desk with drawers and a filing cabinet:
+
+```
+  L0 (Desk)           L1 (Drawer)         L2 (Filing Cabinet)
+  +-----------+       +-----------+       +-----------+
+  | Active    |       | Recently  |       | Archived  |
+  | context   | demote| used      | demote| to disk   |
+  | (in RAM)  | ----> | (in RAM)  | ----> | (JSON on  |
+  |           |       |           |       |  disk)    |
+  +-----------+       +-----------+       +-----------+
+       ^                   |                    |
+       |    promote        |    promote         |
+       +-------------------+--------------------+
+```
+
+- **L0**: The code and variables the agent is working with right now
+- **L1**: Recently accessed file summaries (tree-sitter representations)
+- **L2**: Full history serialized to disk as JSON files
+
+When the VRAM monitor detects memory pressure, it triggers automatic demotion. When an agent needs old context back, it gets promoted from disk.
+
+---
+
+### The Repo Map Server (`repo_map.py`)
+
+A standalone FastAPI service that gives sub-agents a "table of contents" for your codebase.
+
+```
+  Your Codebase                Repo Map Server
+  +-----------+               +-----------------+
+  | engine/   |  tree-sitter  |  AST Index      |
+  |  graph.py | ----------->  |  (in memory)    |
+  |  redel.py |  parse on     |                 |
+  | context/  |  startup      |  GET /map       |
+  |  repo_... |               |  POST /lookup   |
+  +-----------+               |  POST /refresh  |
+                              +-----------------+
+                                     |
+                                     v
+                              XML-packed output:
+                              <codebase_summary>
+                                <file path="engine/graph.py">
+                                  <function name="build_graph">
+                                  ...
+```
+
+Instead of dumping an entire codebase into the agent's prompt (which would blow up VRAM), the agent sees a compressed **XML map** of class names, function signatures, and line numbers (~1024 tokens). When it needs actual code, it requests specific files or symbols via the `/lookup` endpoint.
+
+---
+
+### The Retry Loop
+
+When a sub-agent writes buggy code, the system doesn't just fail -- it tries to fix it:
+
+```
+  Agent writes code
+         |
+         v
+  Sandbox executes
+         |
+    +----+----+
+    |         |
+  exit 0    exit != 0
+    |         |
+    v         v
+  SUCCESS   Send stderr back
+    |       to the same agent
+    |         |
+    v         v
+  Done      Agent fixes code
+              |
+              v
+            Sandbox re-executes
+              |
+         (up to 2 retries)
+```
+
+This is a **basic feedback loop** -- the agent sees its own error and tries again. Phase 3 (TextGrad) will make this much more sophisticated by analyzing *why* the error happened and modifying the agent's prompts to prevent similar mistakes.
+
+---
+
 ## Data Flow Diagram
 
 Here is the complete journey of a task through the system:
@@ -387,24 +526,38 @@ Here is the complete journey of a task through the system:
           |  ]                |
           +-------------------+
                     |
-                    v  (execute_node calls LLM for each child)
+                    v  (execute_node per child)
                     |
-          +-------------------+
-          |  results: [       |
-          |    {id: "a1",     |
-          |     result: "def  |
+          +--------------------+
+          |  1. Fetch repo-map |  (codebase structure from server)
+          |  2. Call LLM       |  (with context injected)
+          |  3. Extract code   |  (regex for ```python blocks)
+          |  4. Run in sandbox |  (isolated subprocess)
+          |  5. If fails:      |
+          |     send error     |
+          |     back to LLM    |
+          |     retry (up 2x)  |
+          +--------------------+
+                    |
+                    v  (results with sandbox output)
+                    |
+          +--------------------+
+          |  results: [        |
+          |    {id: "a1",      |
+          |     result: "def   |
           |       sort(l):...",|
-          |     success: true},|
-          |    {id: "b2",     |
-          |     result: "def  |
-          |       filter(l)...",|
-          |     success: true}|
-          |  ]                |
-          +-------------------+
+          |     success: true, |
+          |     code_executed: |
+          |       true,        |
+          |     stdout: "...", |
+          |     attempts: 1},  |
+          |    ...             |
+          |  ]                 |
+          +--------------------+
                     |
-                    v  (validate_node checks all succeeded)
+                    v  (validate_node checks sandbox results)
                     |
-                    v  (output to user)
+                    v  (output to user with sandbox output)
 ```
 
 ---
@@ -414,10 +567,10 @@ Here is the complete journey of a task through the system:
 The full architecture (across all phases) has four layers:
 
 ```
-  +-------------------------------------------------------+
+  +--------------------------------------------------------+
   |              LANGGRAPH: Deterministic Graph            |
   |          (Controls the outer state machine)            |
-  +-------------------------------------------------------+
+  +--------------------------------------------------------+
                           |
                           v
   +-------------------------------------------------------+
@@ -426,28 +579,32 @@ The full architecture (across all phases) has four layers:
   +-------------------------------------------------------+
                           |
                           v
-  +-------------------------------------------------------+
+  +----------------------------------------------------=---+
   |          AIDER/REPOMIX: Context Optimization           |
   |    (Token-efficient AST repo maps, XML packing)        |
-  +-------------------------------------------------------+
+  +-----------------------------------------------------=--+
                           |
                           v
-  +-------------------------------------------------------+
+  +-----------------------------------------------------=--+
   |          TEXTGRAD: Textual Backpropagation             |
   |    (Computes linguistic gradients, self-corrects)      |
-  +-------------------------------------------------------+
+  +-----------------------------------------------------=--+
 ```
 
-| Layer | File | Phase | Status |
-|-------|------|-------|--------|
-| LangGraph | `engine/graph.py` | 1 | Built |
-| ReDel | `engine/redel.py` | 1 | Built |
-| LLM Client | `engine/llm_client.py` | 1 | Built |
-| CLI Harness | `harness/cli.py` | 1 | Built |
-| Repo Map Server | `context/repo_map.py` | 2 | Not yet built |
-| VRAM Manager | `context/vram_manager.py` | 2 | Not yet built |
-| TextGrad Engine | `engine/textgrad.py` | 3 | Not yet built |
-| Interfaces | `engine/interfaces.py` | Post-1 | Not yet built |
+| Layer           | File                      | Phase   | Status        |
+|-----------------|---------------------------|---------|---------------|
+| LangGraph       | `engine/graph.py`         | 1       | Built         |
+| ReDel           | `engine/redel.py`         | 1       | Built         |
+| LLM Client      | `engine/llm_client.py`    | 1       | Built         |
+| CLI Harness     | `harness/cli.py`          | 1       | Built         |
+| Interfaces      | `engine/interfaces.py`    | 2       | Built         |
+| Repo Map Server | `context/repo_map.py`     | 2       | Built         |
+| VRAM Manager    | `context/vram_manager.py` | 2       | Built         |
+| Sandbox Pool    | `harness/sandbox.py`      | 2       | Built         |
+| VRAM Monitor    | `harness/vram_monitor.py` | 2       | Built         |
+| Event Bus       | `harness/event_bus.py`    | 2       | Built         |
+| TextGrad Engine | `engine/textgrad.py`      | 3       | Not yet built |
+| Dashboard       | `harness/dashboard.py`    | Future  | Not yet built |
 
 ---
 
@@ -456,11 +613,11 @@ The full architecture (across all phases) has four layers:
 ### Phase 1: The Spawning Graph -- DONE
 LangGraph state machine + ReDel spawning logic. The root agent can decide to delegate, spawn children, execute them, and collect results.
 
-### Phase 2: The VRAM Shield -- NEXT
-Tree-sitter-based repository maps (Repomix-style XML packing). Surgical code loading so sub-agents only see the files they need. Three-tier memory manager (L0/L1/L2) to stay under 8GB VRAM.
+### Phase 2: The VRAM Shield -- DONE
+Tree-sitter-based repository maps (Repomix-style XML packing). Sandbox code execution with automatic retry on failure. Three-tier memory manager (L0/L1/L2). VRAM monitoring daemon. Event bus for engine-harness communication. Qwen 3.5 thinking mode handling.
 
-### Phase 3: TextGrad Backpropagation
-Textual autograd engine. Treats terminal errors as "loss functions," computes "textual gradients" (structured critiques), and backpropagates them through the execution tree to fix the agent's prompts or code.
+### Phase 3: TextGrad Backpropagation -- NEXT
+Textual autograd engine. Treats terminal errors as "loss functions," computes "textual gradients" (structured critiques), and backpropagates them through the execution tree to fix the agent's prompts or code. This is the hardest phase -- involves custom graph traversal, information density scoring, and dynamic gradient routing.
 
 ---
 
@@ -505,18 +662,22 @@ python -m harness.cli --task "Complex task here" --verbose --json
 RecurseForge/
 |
 +-- engine/                     # The recursion engine
-|   +-- graph.py                # LangGraph state machine (outer loop)
-|   +-- redel.py                # Task decomposition / node spawning
-|   +-- llm_client.py           # OpenAI SDK wrapper for llama.cpp
+|   +-- graph.py                # LangGraph state machine (outer loop + sandbox/repo-map wiring)
+|   +-- redel.py                # Task decomposition, code extraction, retry prompts
+|   +-- llm_client.py           # OpenAI SDK wrapper with thinking mode control
+|   +-- interfaces.py           # Pydantic v2 models (all interface contracts)
 |   +-- textgrad.py             # (Phase 3) Textual backpropagation
-|   +-- interfaces.py           # (Post-Phase 1) Pydantic models
 |
 +-- context/                    # Context optimization layer
-|   +-- repo_map.py             # (Phase 2) Tree-sitter repo map server
-|   +-- vram_manager.py         # (Phase 2) L0/L1/L2 tiered memory
+|   +-- repo_map.py             # Tree-sitter repo map server (FastAPI)
+|   +-- vram_manager.py         # L0/L1/L2 tiered memory manager
 |
 +-- harness/                    # The custom harness
 |   +-- cli.py                  # CLI orchestrator entry point
+|   +-- sandbox.py              # Sandbox executor pool (subprocess workers)
+|   +-- vram_monitor.py         # VRAM monitor daemon (pynvml polling)
+|   +-- event_bus.py            # Engine-harness event bus (queue.Queue)
+|   +-- dashboard.py            # (Future) Gradient log viewer (Streamlit)
 |
 +-- .venv/                      # Python virtual environment
 +-- .devcontainer/              # Docker dev container config
