@@ -7,8 +7,10 @@ llm:
   base_url: "http://localhost:8080/v1"
   # Model name passed in API requests (llama.cpp accepts any string)
   model_name: "qwen"
-  # Max tokens the model can generate per call
-  max_tokens: 1024
+  # Max tokens the model can generate per call.
+  # Qwen 3.5 shares this budget between thinking + content.
+  # 4096 gives enough room for both reasoning and response.
+  max_tokens: 4096
   # Lower = more deterministic, higher = more creative
   temperature: 0.3
 
@@ -19,6 +21,9 @@ recursion:
   max_depth: 3
   # Maximum number of children any single agent can spawn per level.
   max_children: 4
+  # Max retries per child when sandbox execution fails.
+  # On failure, the error is sent back to the LLM to fix the code.
+  max_retries: 2
 
 context:
   # Target codebase directory for the repo-map server to index.
@@ -32,10 +37,10 @@ context:
 vram:
   # VRAM warning threshold in MB (75% of 8GB).
   # At this level, L1 data is demoted to L2 (serialized to disk).
-  warning_mb: 6000
-  # VRAM critical threshold in MB (94% of 8GB).
+  warning_mb: 6500
+  # VRAM critical threshold in MB (90% of 8GB).
   # At this level, oldest L0 context is forcefully evicted.
-  critical_mb: 7500
+  critical_mb: 7000
   # How often the VRAM monitor polls GPU memory (seconds).
   poll_interval_s: 2.0
 

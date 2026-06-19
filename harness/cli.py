@@ -76,8 +76,25 @@ def format_result(result: dict) -> str:
         lines.append(f"--- {len(children)} Sub-tasks Executed ---")
         for i, r in enumerate(results):
             status = "OK" if r.get("success") else "FAILED"
-            lines.append(f"\n[{i + 1}] {r['task']}  ({status})")
-            lines.append(f"    {r['result'][:500] if r['result'] else '(no output)'}")
+            code_tag = " [code executed]" if r.get("code_executed") else " [text only]"
+            attempts = r.get("attempts", 1)
+            retry_tag = f" ({attempts} attempts)" if attempts > 1 else ""
+            lines.append(f"\n[{i + 1}] {r['task']}  ({status}){code_tag}{retry_tag}")
+
+            # Show LLM response (truncated)
+            llm_text = r.get("result", "") or "(no output)"
+            lines.append(f"    {llm_text[:400]}")
+
+            # Show sandbox output if code was executed
+            if r.get("code_executed"):
+                stdout = r.get("stdout", "").strip()
+                stderr = r.get("stderr", "").strip()
+                exit_code = r.get("exit_code", "?")
+                lines.append(f"    --- Sandbox (exit {exit_code}) ---")
+                if stdout:
+                    lines.append(f"    stdout: {stdout[:300]}")
+                if stderr:
+                    lines.append(f"    stderr: {stderr[:300]}")
 
     lines.append("")
     lines.append("=" * 60)
@@ -173,6 +190,9 @@ def main():
         print(format_result(result))
 
     # Shutdown
+    from engine.graph import _sandbox_pool
+    if _sandbox_pool is not None:
+        _sandbox_pool.shutdown()
     if vram_monitor:
         vram_monitor.stop()
     bus.stop()

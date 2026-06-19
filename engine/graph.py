@@ -25,8 +25,55 @@ from engine import redel
 from engine.llm_client import get_client, chat_completion
 from engine.interfaces import EngineEvent, EventType
 from harness.event_bus import get_event_bus
+from harness.sandbox import SandboxPool
 
 logger = logging.getLogger("recurseforge.engine")
+
+# ---------------------------------------------------------------------------
+# Repo-map client (optional -- used if repo-map server is running)
+# ---------------------------------------------------------------------------
+
+def _fetch_repo_map(config: dict) -> str:
+    """Try to fetch the repo map from the server. Returns empty string on failure."""
+    ctx_cfg = config.get("context", {})
+    if not ctx_cfg:
+        return ""
+    port = ctx_cfg.get("repo_map_port", 8001)
+    max_tokens = ctx_cfg.get("max_map_tokens", 1024)
+    try:
+        import httpx
+        resp = httpx.get(
+            "http://127.0.0.1:{}/map".format(port),
+            params={"max_tokens": max_tokens},
+            timeout=10.0,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            xml = data.get("map", "")
+            logger.info("[REPO-MAP] Fetched map (%d tokens, %d files indexed)",
+                        data.get("token_count", 0),
+                        data.get("files_indexed", 0))
+            return xml
+    except Exception as e:
+        logger.debug("[REPO-MAP] Server not available (%s). "
+                     "Running without codebase context.", e)
+    return ""
+
+
+# Global sandbox pool (created once, reused across calls)
+_sandbox_pool: SandboxPool | None = None
+
+
+def _get_sandbox(config: dict) -> SandboxPool:
+    """Get or create the global sandbox pool."""
+    global _sandbox_pool
+    if _sandbox_pool is None:
+        sbx_cfg = config.get("sandbox", {})
+        _sandbox_pool = SandboxPool(
+            pool_size=sbx_cfg.get("pool_size", 4),
+            timeout_s=sbx_cfg.get("timeout_s", 30),
+        )
+    return _sandbox_pool
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +137,7 @@ def plan_node(state: RecursionState) -> dict:
         messages=messages,
         max_tokens=llm_cfg["max_tokens"],
         temperature=llm_cfg["temperature"],
+        no_think=True,  # Planning step: disable thinking, we just need JSON
     )
 
     plan_response = redel.parse_plan_response(llm_output)
@@ -121,16 +169,38 @@ def plan_node(state: RecursionState) -> dict:
     # Direct answer -- no delegation
     answer = plan_response.get("answer", llm_output)
     logger.info("[PLAN] Answering directly (%d chars)", len(answer))
+
+    # Even for direct answers, extract and execute code if present
+    code = redel.extract_python_code(answer)
+    if code:
+        logger.info("[PLAN] Direct answer contains code (%d chars), "
+                    "executing in sandbox...", len(code))
+        sandbox = _get_sandbox(state["config"])
+        exec_result = sandbox.execute("direct", code)
+        if exec_result.exit_code == 0:
+            logger.info("[PLAN] Direct code execution OK (stdout: %d chars)",
+                        len(exec_result.stdout))
+            answer += "\n\n--- Sandbox Output ---\n" + exec_result.stdout
+        else:
+            logger.warning("[PLAN] Direct code execution failed: %s",
+                           exec_result.stderr[:200])
+            answer += "\n\n--- Sandbox Error ---\n" + exec_result.stderr
+
     return {"status": "done", "direct_answer": answer}
 
 
 def execute_node(state: RecursionState) -> dict:
     """
-    Run each child sub-task through the LLM and collect results.
+    Run each child sub-task through the LLM, extract code, execute in
+    sandbox, and retry on failure.
 
-    Each child is an independent LLM call. Results are stored in the
-    child's "result" field and also aggregated into the top-level
-    "results" list.
+    Flow per child:
+      1. Build messages (with repo-map if available)
+      2. Call LLM -> get text response
+      3. Extract Python code from response
+      4. If code found -> run in sandbox
+      5. If sandbox fails -> send error back to LLM, retry (up to max_retries)
+      6. Store result (LLM text + sandbox output)
     """
     config = state["config"]
     llm_cfg = config["llm"]
@@ -138,7 +208,18 @@ def execute_node(state: RecursionState) -> dict:
     children = state.get("children", [])
     bus = get_event_bus()
 
-    logger.info("[EXECUTE] Running %d children...", len(children))
+    # Fetch repo map once for all children in this batch
+    repo_map = _fetch_repo_map(config)
+
+    # Get sandbox pool
+    sandbox = _get_sandbox(config)
+
+    # Retry settings
+    max_retries = config.get("recursion", {}).get("max_retries", 2)
+
+    logger.info("[EXECUTE] Running %d children (repo_map: %s, sandbox: ready)...",
+                len(children),
+                "available" if repo_map else "not available")
     results = []
 
     for i, child in enumerate(children):
@@ -147,32 +228,16 @@ def execute_node(state: RecursionState) -> dict:
                     child["node_id"],
                     child["task"][:60])
 
-        messages = redel.build_execute_messages(child["task"])
+        # --- LLM call with repo-map context ---
+        messages = redel.build_execute_messages(child["task"], repo_map=repo_map)
         try:
-            result = chat_completion(
+            llm_response = chat_completion(
                 client=client,
                 model=llm_cfg["model_name"],
                 messages=messages,
                 max_tokens=llm_cfg["max_tokens"],
                 temperature=llm_cfg["temperature"],
             )
-            child["result"] = result
-            results.append({
-                "node_id": child["node_id"],
-                "task": child["task"],
-                "result": result,
-                "success": True,
-            })
-            logger.info("[EXECUTE] Child [%s] succeeded (%d chars)",
-                        child["node_id"], len(result))
-            bus.emit(EngineEvent(
-                event_type=EventType.NODE_COMPLETE.value,
-                payload={
-                    "node_id": child["node_id"],
-                    "result_summary": result[:200],
-                    "token_usage": len(result.split()),
-                },
-            ))
         except Exception as e:
             child["result"] = None
             results.append({
@@ -180,17 +245,101 @@ def execute_node(state: RecursionState) -> dict:
                 "task": child["task"],
                 "result": str(e),
                 "success": False,
+                "code_executed": False,
             })
-            logger.error("[EXECUTE] Child [%s] failed: %s",
+            logger.error("[EXECUTE] Child [%s] LLM call failed: %s",
                          child["node_id"], e)
-            bus.emit(EngineEvent(
-                event_type=EventType.NODE_COMPLETE.value,
-                payload={
-                    "node_id": child["node_id"],
-                    "result_summary": str(e)[:200],
-                    "token_usage": 0,
-                },
-            ))
+            continue
+
+        # --- Extract and execute code ---
+        code = redel.extract_python_code(llm_response)
+        exec_result = None
+        success = True
+        attempts = 0
+
+        if code:
+            logger.info("[EXECUTE] Child [%s]: extracted %d chars of code, "
+                        "running in sandbox...", child["node_id"], len(code))
+
+            # Execute in sandbox (with retries on failure)
+            for attempt in range(max_retries + 1):
+                attempts = attempt + 1
+                exec_result = sandbox.execute(child["node_id"], code)
+
+                if exec_result.exit_code == 0:
+                    logger.info("[EXECUTE] Child [%s]: code OK (attempt %d, "
+                                "stdout: %d chars)",
+                                child["node_id"], attempts,
+                                len(exec_result.stdout))
+                    break
+                else:
+                    logger.warning("[EXECUTE] Child [%s]: code failed (attempt %d/%d): %s",
+                                   child["node_id"], attempts, max_retries + 1,
+                                   exec_result.stderr[:200])
+
+                    if attempt < max_retries:
+                        # Retry: send error back to LLM
+                        error_msg = exec_result.stderr or "Exit code: {}".format(
+                            exec_result.exit_code)
+                        retry_messages = redel.build_retry_messages(
+                            child["task"], code, error_msg)
+                        try:
+                            llm_response = chat_completion(
+                                client=client,
+                                model=llm_cfg["model_name"],
+                                messages=retry_messages,
+                                max_tokens=llm_cfg["max_tokens"],
+                                temperature=llm_cfg["temperature"],
+                            )
+                            new_code = redel.extract_python_code(llm_response)
+                            if new_code:
+                                code = new_code
+                                logger.info("[EXECUTE] Child [%s]: retrying with "
+                                            "fixed code (%d chars)",
+                                            child["node_id"], len(code))
+                            else:
+                                logger.warning("[EXECUTE] Child [%s]: retry response "
+                                               "had no code block", child["node_id"])
+                                break
+                        except Exception as e:
+                            logger.error("[EXECUTE] Child [%s]: retry LLM call "
+                                         "failed: %s", child["node_id"], e)
+                            break
+        else:
+            logger.info("[EXECUTE] Child [%s]: no code block found, "
+                        "treating as text-only response", child["node_id"])
+
+        # Determine success
+        if exec_result and exec_result.exit_code != 0:
+            success = False
+
+        child["result"] = llm_response
+        result_entry = {
+            "node_id": child["node_id"],
+            "task": child["task"],
+            "result": llm_response,
+            "success": success,
+            "code_executed": code is not None,
+            "attempts": attempts,
+        }
+        if exec_result:
+            result_entry["stdout"] = exec_result.stdout[:500]
+            result_entry["stderr"] = exec_result.stderr[:500]
+            result_entry["exit_code"] = exec_result.exit_code
+        results.append(result_entry)
+
+        # Emit event
+        bus.emit(EngineEvent(
+            event_type=EventType.NODE_COMPLETE.value,
+            payload={
+                "node_id": child["node_id"],
+                "result_summary": llm_response[:200],
+                "token_usage": len(llm_response.split()),
+                "code_executed": code is not None,
+                "sandbox_exit_code": exec_result.exit_code if exec_result else None,
+                "attempts": attempts,
+            },
+        ))
 
     return {"status": "validating", "results": results}
 
@@ -199,18 +348,24 @@ def validate_node(state: RecursionState) -> dict:
     """
     Check execution results and produce the final status.
 
-    Phase 1: simple validation -- if all children succeeded, mark done.
-    Phase 3 will add TextGrad-based re-planning for failed children.
+    Reports sandbox execution outcomes: code execution success/failure,
+    retry counts, and stdout/stderr summaries.
     """
     results = state.get("results", [])
     all_success = all(r.get("success", False) for r in results)
     failed = [r for r in results if not r.get("success")]
+    code_runs = [r for r in results if r.get("code_executed")]
+    retried = [r for r in results if r.get("attempts", 1) > 1]
 
     if all_success:
-        logger.info("[VALIDATE] All %d children succeeded.", len(results))
+        logger.info("[VALIDATE] All %d children succeeded. "
+                    "%d had code execution, %d required retries.",
+                    len(results), len(code_runs), len(retried))
     else:
-        logger.warning("[VALIDATE] %d/%d children failed.",
-                       len(failed), len(results))
+        logger.warning("[VALIDATE] %d/%d children failed. "
+                       "%d had code execution, %d required retries.",
+                       len(failed), len(results),
+                       len(code_runs), len(retried))
 
     return {"status": "done"}
 

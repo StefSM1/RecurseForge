@@ -11,6 +11,7 @@ This module handles:
 """
 
 import json
+import re
 import uuid
 
 # ---------------------------------------------------------------------------
@@ -18,6 +19,7 @@ import uuid
 # ---------------------------------------------------------------------------
 
 PLAN_SYSTEM_PROMPT = """\
+/no_think
 You are a task decomposition agent inside a recursive agent framework.
 Your job is to decide whether a given task should be broken into sub-tasks
 or answered directly.
@@ -35,10 +37,39 @@ Respond in this EXACT JSON format (no markdown, no code fences, raw JSON):
 """
 
 EXECUTE_SYSTEM_PROMPT = """\
-You are a sub-agent inside a recursive agent framework.
+You are a coding sub-agent inside a recursive agent framework.
 You have been assigned a single, specific task. Complete it thoroughly.
-Do NOT ask clarifying questions -- work with what you have.
-Return your complete result as plain text.
+
+RULES:
+- If your task involves writing code, wrap it in a single ```python ... ``` block.
+- Your code WILL be executed automatically in a sandbox. Make sure it runs without errors.
+- Include a brief explanation before the code block.
+- Do NOT ask clarifying questions -- work with what you have.
+- If a codebase map is provided below, use it to understand the project structure
+  and write code that fits naturally with the existing code.
+
+{repo_map_section}
+"""
+
+REPO_MAP_TEMPLATE = """\
+=== CODEBASE MAP ===
+Below is an overview of the target project. Use it to understand the project
+structure, existing functions/classes, and write code that integrates well.
+
+{repo_map}
+=== END CODEBASE MAP ===
+"""
+
+RETRY_PROMPT_TEMPLATE = """\
+Your previous code was executed but FAILED with this error:
+
+```
+{error_output}
+```
+
+Please fix the code and provide the corrected version.
+Wrap the fixed code in a ```python ... ``` block.
+Explain what went wrong and how you fixed it.
 """
 
 
@@ -69,17 +100,79 @@ def build_plan_messages(
     ]
 
 
-def build_execute_messages(task: str) -> list[dict]:
+def build_execute_messages(task: str, repo_map: str = "") -> list[dict]:
     """
     Build the message list for executing a single sub-task.
+
+    Args:
+        task: The sub-task description.
+        repo_map: Optional XML-packed codebase overview to inject.
 
     Returns:
         A list of {"role": ..., "content": ...} dicts ready for the LLM.
     """
+    if repo_map:
+        repo_section = REPO_MAP_TEMPLATE.format(repo_map=repo_map)
+    else:
+        repo_section = ""
+    system = EXECUTE_SYSTEM_PROMPT.format(repo_map_section=repo_section)
     return [
-        {"role": "system", "content": EXECUTE_SYSTEM_PROMPT},
+        {"role": "system", "content": system},
         {"role": "user", "content": task},
     ]
+
+
+def build_retry_messages(original_task: str, previous_code: str,
+                         error_output: str) -> list[dict]:
+    """
+    Build messages for retrying after a sandbox execution failure.
+
+    Args:
+        original_task: The original sub-task description.
+        previous_code: The code that failed.
+        error_output: The stderr/timeout message from the sandbox.
+
+    Returns:
+        Message list that asks the LLM to fix the code.
+    """
+    return [
+        {"role": "system", "content": EXECUTE_SYSTEM_PROMPT.format(
+            repo_map_section="")},
+        {"role": "user", "content": original_task},
+        {"role": "assistant", "content": previous_code},
+        {"role": "user", "content": RETRY_PROMPT_TEMPLATE.format(
+            error_output=error_output[:2000])},
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Code extraction
+# ---------------------------------------------------------------------------
+
+
+def extract_python_code(text: str) -> str | None:
+    """
+    Extract the first Python code block from the LLM's response.
+
+    Looks for ```python ... ``` fenced blocks. Returns the code inside
+    the block, or None if no code block is found.
+    """
+    # Match ```python ... ``` blocks
+    pattern = r"```python\s*\n(.*?)```"
+    match = re.search(pattern, text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+
+    # Fallback: try ``` ... ``` (without language tag)
+    pattern = r"```\s*\n(.*?)```"
+    match = re.search(pattern, text, re.DOTALL)
+    if match:
+        code = match.group(1).strip()
+        # Only return if it looks like Python (has def/class/import/indentation)
+        if any(kw in code for kw in ["def ", "class ", "import ", "    ", "print("]):
+            return code
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +213,9 @@ def parse_plan_response(llm_output: str) -> dict:
             parsed = json.loads(json_str)
             if "delegate" in parsed:
                 return parsed
+            # Model returned {"answer": "..."} without "delegate" field
+            if "answer" in parsed:
+                return {"delegate": False, "answer": parsed["answer"]}
         except json.JSONDecodeError:
             pass
 
