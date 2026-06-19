@@ -49,3 +49,16 @@ sandbox:
   pool_size: 4
   # Timeout per code execution (seconds).
   timeout_s: 30
+
+textgrad:
+  # Enable TextGrad structured gradient fixing.
+  # When enabled, failed code goes through TextGrad's evaluate -> gradient -> fix
+  # loop instead of the simple "here's the error, fix it" retry.
+  # TextGrad uses 2 extra LLM calls per iteration (evaluator + updater).
+  enabled: false
+  # How many gradient iterations per failure (each = evaluate + fix).
+  max_iterations: 1
+  # Temperature for the evaluator LLM (low = precise critique).
+  eval_temperature: 0.1
+  # Temperature for the updater LLM (low = faithful to gradient).
+  update_temperature: 0.2

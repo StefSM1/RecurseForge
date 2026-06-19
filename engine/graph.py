@@ -26,6 +26,7 @@ from engine.llm_client import get_client, chat_completion
 from engine.interfaces import EngineEvent, EventType
 from harness.event_bus import get_event_bus
 from harness.sandbox import SandboxPool
+from engine.textgrad import gradient_fix
 
 logger = logging.getLogger("recurseforge.engine")
 
@@ -184,7 +185,45 @@ def plan_node(state: RecursionState) -> dict:
         else:
             logger.warning("[PLAN] Direct code execution failed: %s",
                            exec_result.stderr[:200])
-            answer += "\n\n--- Sandbox Error ---\n" + exec_result.stderr
+
+            # Try TextGrad if enabled
+            tg_cfg = state["config"].get("textgrad", {})
+            if tg_cfg.get("enabled", False):
+                logger.info("[PLAN] Using TextGrad to fix direct answer code...")
+                try:
+                    error_msg = exec_result.stderr or "Exit code: {}".format(
+                        exec_result.exit_code)
+                    fixed_code, grad_log = gradient_fix(
+                        client=client,
+                        model=llm_cfg["model_name"],
+                        code=code,
+                        task=state["task_description"],
+                        stdout=exec_result.stdout,
+                        stderr=error_msg,
+                        max_iterations=tg_cfg.get("max_iterations", 1),
+                        eval_temperature=tg_cfg.get("eval_temperature", 0.1),
+                        update_temperature=tg_cfg.get("update_temperature", 0.2),
+                        max_tokens=llm_cfg["max_tokens"],
+                    )
+                    # Re-execute the fixed code
+                    exec_result2 = sandbox.execute("direct_fixed", fixed_code)
+                    if exec_result2.exit_code == 0:
+                        logger.info("[PLAN] TextGrad fixed the code! (stdout: %d chars)",
+                                    len(exec_result2.stdout))
+                        answer += ("\n\n--- TextGrad Fixed Code ---\n"
+                                   + fixed_code
+                                   + "\n\n--- Sandbox Output (after fix) ---\n"
+                                   + exec_result2.stdout)
+                    else:
+                        logger.warning("[PLAN] TextGrad fix still failed: %s",
+                                       exec_result2.stderr[:200])
+                        answer += ("\n\n--- Sandbox Error (after TextGrad attempt) ---\n"
+                                   + exec_result2.stderr)
+                except Exception as e:
+                    logger.error("[PLAN] TextGrad failed: %s", e)
+                    answer += "\n\n--- Sandbox Error ---\n" + exec_result.stderr
+            else:
+                answer += "\n\n--- Sandbox Error ---\n" + exec_result.stderr
 
     return {"status": "done", "direct_answer": answer}
 
@@ -278,33 +317,93 @@ def execute_node(state: RecursionState) -> dict:
                                    exec_result.stderr[:200])
 
                     if attempt < max_retries:
-                        # Retry: send error back to LLM
-                        error_msg = exec_result.stderr or "Exit code: {}".format(
-                            exec_result.exit_code)
-                        retry_messages = redel.build_retry_messages(
-                            child["task"], code, error_msg)
-                        try:
-                            llm_response = chat_completion(
-                                client=client,
-                                model=llm_cfg["model_name"],
-                                messages=retry_messages,
-                                max_tokens=llm_cfg["max_tokens"],
-                                temperature=llm_cfg["temperature"],
-                            )
-                            new_code = redel.extract_python_code(llm_response)
-                            if new_code:
-                                code = new_code
-                                logger.info("[EXECUTE] Child [%s]: retrying with "
-                                            "fixed code (%d chars)",
-                                            child["node_id"], len(code))
-                            else:
-                                logger.warning("[EXECUTE] Child [%s]: retry response "
-                                               "had no code block", child["node_id"])
+                        # Check if TextGrad is enabled
+                        tg_cfg = config.get("textgrad", {})
+                        use_textgrad = tg_cfg.get("enabled", False)
+
+                        if use_textgrad:
+                            # TextGrad: structured gradient fix
+                            logger.info("[EXECUTE] Child [%s]: using TextGrad to fix code...",
+                                        child["node_id"])
+                            error_msg = exec_result.stderr or "Exit code: {}".format(
+                                exec_result.exit_code)
+                            try:
+                                fixed_code, grad_log = gradient_fix(
+                                    client=client,
+                                    model=llm_cfg["model_name"],
+                                    code=code,
+                                    task=child["task"],
+                                    stdout=exec_result.stdout,
+                                    stderr=error_msg,
+                                    max_iterations=tg_cfg.get("max_iterations", 1),
+                                    eval_temperature=tg_cfg.get("eval_temperature", 0.1),
+                                    update_temperature=tg_cfg.get("update_temperature", 0.2),
+                                    max_tokens=llm_cfg["max_tokens"],
+                                )
+                                code = fixed_code
+                                logger.info("[EXECUTE] Child [%s]: TextGrad applied "
+                                            "(%d iterations, %d chars)",
+                                            child["node_id"], len(grad_log), len(code))
+                                # Emit gradient flow event
+                                for g in grad_log:
+                                    bus.emit(EngineEvent(
+                                        event_type=EventType.GRADIENT_FLOW.value,
+                                        payload={
+                                            "node_id": child["node_id"],
+                                            "iteration": g["iteration"],
+                                            "severity": g["severity"],
+                                            "num_mutations": g["num_mutations"],
+                                        },
+                                    ))
+                            except Exception as e:
+                                logger.error("[EXECUTE] Child [%s]: TextGrad failed: %s",
+                                             child["node_id"], e)
+                                # Fall back to simple retry
+                                error_msg = exec_result.stderr or "Exit code: {}".format(
+                                    exec_result.exit_code)
+                                retry_messages = redel.build_retry_messages(
+                                    child["task"], code, error_msg)
+                                try:
+                                    llm_response = chat_completion(
+                                        client=client,
+                                        model=llm_cfg["model_name"],
+                                        messages=retry_messages,
+                                        max_tokens=llm_cfg["max_tokens"],
+                                        temperature=llm_cfg["temperature"],
+                                    )
+                                    new_code = redel.extract_python_code(llm_response)
+                                    if new_code:
+                                        code = new_code
+                                except Exception:
+                                    break
+                        else:
+                            # Simple retry: send error back to LLM
+                            error_msg = exec_result.stderr or "Exit code: {}".format(
+                                exec_result.exit_code)
+                            retry_messages = redel.build_retry_messages(
+                                child["task"], code, error_msg)
+                            try:
+                                llm_response = chat_completion(
+                                    client=client,
+                                    model=llm_cfg["model_name"],
+                                    messages=retry_messages,
+                                    max_tokens=llm_cfg["max_tokens"],
+                                    temperature=llm_cfg["temperature"],
+                                )
+                                new_code = redel.extract_python_code(llm_response)
+                                if new_code:
+                                    code = new_code
+                                    logger.info("[EXECUTE] Child [%s]: retrying with "
+                                                "fixed code (%d chars)",
+                                                child["node_id"], len(code))
+                                else:
+                                    logger.warning("[EXECUTE] Child [%s]: retry response "
+                                                   "had no code block", child["node_id"])
+                                    break
+                            except Exception as e:
+                                logger.error("[EXECUTE] Child [%s]: retry LLM call "
+                                             "failed: %s", child["node_id"], e)
                                 break
-                        except Exception as e:
-                            logger.error("[EXECUTE] Child [%s]: retry LLM call "
-                                         "failed: %s", child["node_id"], e)
-                            break
         else:
             logger.info("[EXECUTE] Child [%s]: no code block found, "
                         "treating as text-only response", child["node_id"])

@@ -20,6 +20,12 @@ RecurseForge is a summer project that combines four powerful ideas from the open
   - [The State Machine (graph.py)](#the-state-machine-graphpy)
   - [The LLM Client (llm_client.py)](#the-llm-client-llm_clientpy)
   - [The Harness (cli.py)](#the-harness-clipy)
+  - [The Sandbox (sandbox.py)](#the-sandbox-sandboxpy)
+  - [The Event Bus (event_bus.py)](#the-event-bus-event_buspy)
+  - [The VRAM Manager (vram_manager.py)](#the-vram-manager-vram_managerpy)
+  - [The Repo Map Server (repo_map.py)](#the-repo-map-server-repo_mappy)
+  - [The Retry Loop](#the-retry-loop)
+  - [The Diagnostician (textgrad.py)](#the-diagnostician-textgradpy----phase-3a)
 - [Data Flow Diagram](#data-flow-diagram)
 - [Architecture Overview](#architecture-overview)
 - [Project Roadmap](#project-roadmap)
@@ -52,13 +58,13 @@ Imagine you give a complex task to a single AI. It tries to do everything at onc
                          /     |     \
                         /      |      \
                        v       v       v
-              +---------+ +---------+ +---------+
-              | Agent A | | Agent B | | Agent C |
-              | Fetch   | | Parse   | | Format  |
-              | the HTML| | the data| | to JSON |
-              +---------+ +---------+ +---------+
-                  |           |           |
-                  v           v           v
+              +----------+ +---------+ +---------+
+              | Agent A  | | Agent B | | Agent C |
+              | Fetch    | | Parse   | | Format  |
+              | the HTML | | the data| | to JSON |
+              +----------+ +---------+ +---------+
+                  |            |           |
+                  v            v           v
                 "HTML..."  "parsed..."  "JSON..."
                    \           |          /
                     \          |         /
@@ -115,13 +121,13 @@ An agentic loop is when an AI model doesn't just answer once - it runs in a **cy
 **Analogy: A chef cooking a recipe**
 
 ```
-    +-------> THINK: "What should I do next?"
+    +------->  THINK: "What should I do next?"
     |            |
     |            v
-    |       ACT: Chop onion / stir pot / add spice
+    |           ACT: Chop onion / stir pot / add spice
     |            |
     |            v
-    |       OBSERVE: Taste the dish / check the timer
+    |         OBSERVE: Taste the dish / check the timer
     |            |
     +------------+
          |
@@ -290,11 +296,11 @@ Each node is a simple Python function that receives the current state and return
 A thin wrapper around the OpenAI Python SDK that points at a **local** llama.cpp server.
 
 ```
-  +-----------------+     HTTP      +-------------------+
-  |  Python code    | ------------> |  llama.cpp        |
-  |  openai.Chat... |  localhost    |  llama-server     |
-  |                 |   :8080/v1    |  (your Qwen model)|
-  +-----------------+               +-------------------+
+  +-----------------+     HTTP      +---------------------+
+  |  Python code    | ------------> |  llama.cpp          |
+  |  openai.Chat... |  localhost    |  llama-server       |
+  |                 |   :8080/v1    |  (your Qwen model)  |
+  +-----------------+               +---------------------+
 ```
 
 Why use the OpenAI SDK for a local model? Because llama.cpp exposes an **OpenAI-compatible API**. We just change the `base_url` from `api.openai.com` to `localhost:8080/v1`. This means:
@@ -310,16 +316,16 @@ Why use the OpenAI SDK for a local model? Because llama.cpp exposes an **OpenAI-
 The harness is the "shell" that wraps the engine. It does NOT contain any AI logic.
 
 ```
-  +-------------------+          +---------------------+
-  |     HARNESS       |          |       ENGINE        |
-  |     (cli.py)      |          |  (graph.py +        |
-  |                   |          |   redel.py +        |
-  | - Loads config    |  calls   |   llm_client.py)    |
-  | - Reads user input| -------> |                     |
-  | - Invokes graph   |          | - All LLM calls     |
-  | - Formats output  |  result  | - All spawning      |
-  |                   | <------- | - All execution     |
-  +-------------------+          +---------------------+
+  +--------------------+          +---------------------+
+  |     HARNESS        |          |       ENGINE        |
+  |     (cli.py)       |          |  (graph.py +        |
+  |                    |          |   redel.py +        |
+  | - Loads config     |  calls   |   llm_client.py)    |
+  | - Reads user input | -------> |                     |
+  | - Invokes graph    |          | - All LLM calls     |
+  | - Formats output   |  result  | - All spawning      |
+  |                    | <------- | - All execution     |
+  +--------------------+          +---------------------+
 ```
 
 The separation matters:
@@ -383,13 +389,13 @@ The event bus is like a bulletin board. When something important happens, the en
                             +------------+              VRAM Monitor
                                                        CLI Logger
  
-  execute_node              +--------------+
-  child finishes ---------> | NODE_COMPLETE| ------->  Dashboard
-                            +--------------+            CLI Logger
+  execute_node              +---------------+
+  child finishes ---------> | NODE_COMPLETE | ------->  Dashboard
+                            +---------------+            CLI Logger
                            
-  VRAM monitor              +-------------+
-  detects spike --------->  | VRAM_ALERT  | ------->  VRAM Manager
-                            +-------------+            (demotes L1->L2)
+  VRAM monitor              +------------+
+  detects spike --------->  | VRAM_ALERT | ------->  VRAM Manager
+                            +------------+            (demotes L1->L2)
 ```
 
 The engine doesn't need to know who's reading the notes. It just posts them. This is called **pub/sub** (publish/subscribe) and keeps components loosely connected.
@@ -475,7 +481,95 @@ When a sub-agent writes buggy code, the system doesn't just fail -- it tries to 
          (up to 2 retries)
 ```
 
-This is a **basic feedback loop** -- the agent sees its own error and tries again. Phase 3 (TextGrad) will make this much more sophisticated by analyzing *why* the error happened and modifying the agent's prompts to prevent similar mistakes.
+This is a **basic feedback loop** -- the agent sees its own error and tries again. Phase 3 (TextGrad) makes this much more sophisticated.
+
+---
+
+### The Diagnostician (`textgrad.py`) -- Phase 3a
+
+The Diagnostician is a new expert that replaces the blunt "fix it" retry with a **structured medical examination** of failed code. Instead of handing the agent a wall of error text, it performs a precise diagnosis and writes a targeted prescription.
+
+**The problem with the basic retry:**
+
+```
+  Phase 2 retry (blunt):
+    Code fails with: "NameError: name 'os' is not defined"
+    Agent gets: "Here's the error, fix it"
+    Agent: "uh... let me try again?"
+```
+
+**What the Diagnostician does instead:**
+
+```
+  Phase 3 TextGrad (precise):
+    Code fails with: "NameError: name 'os' is not defined"
+    
+    DIAGNOSTICIAN (Evaluator):
+      "I've examined the code and its execution.
+       LINE: 3
+       CAUSE: The os.path.join() call uses 'os' but it was never imported.
+       FIX: Add 'import os' at the top of the file."
+    
+    PRESCRIBER (Updater):
+      "Applying the diagnosis to produce fixed code..."
+      -> Returns code with 'import os' added
+```
+
+The Diagnostician has three components, inspired by PyTorch's autograd:
+
+```
+  +--------------------+     +--------------------+     +--------------------+
+  |   TextVariable     |     |     TextLoss       |     |       TGD          |
+  |   (the patient)    |     |   (the doctor)     |     |  (the pharmacist)  |
+  |                    |     |                    |     |                    |
+  | Holds the code     | --> | Examines the code  | --> | Applies the fix    |
+  | Tracks gradients   |     | + execution output |     | based on the       |
+  | Records history    |     | Writes a structured|     | doctor's           |
+  |                    |     | diagnosis (LINE/   |     | prescription       |
+  |                    |     | CAUSE/FIX format)  |     |                    |
+  +--------------------+     +--------------------+     +--------------------+
+         |                          |                          |
+         |    backward(grad)        |   loss = evaluate()      |  optimizer.step()
+         |  <-----------------      |  <---------------        |  <-------------
+         |                          |                          |
+         v                          v                          v
+    Updated code             Structured gradient         Fixed code
+    (new version)            (LINE/CAUSE/FIX)            (ready to re-test)
+```
+
+**Why two separate LLM calls (doctor + pharmacist)?**
+
+Separation of concerns. The evaluator's job is to **diagnose** (find what's wrong). The updater's job is to **prescribe** (fix it). If one LLM tries to do both at once, it tends to be vague ("your code has some issues, try fixing them"). With separate calls:
+- The evaluator is forced to be **specific** (it must name line numbers and causes)
+- The updater is forced to **follow instructions** (it applies each fix precisely)
+
+This mirrors how real medicine works: the doctor who diagnoses you is not the same person who fills your prescription.
+
+**The gradient format (UID principle):**
+
+Each mutation is compressed into a single dense line, following the Uniform Information Density principle from the FedTextGrad paper:
+
+```
+[L5] CAUSE: Missing import statement -> FIX: Add 'import os' at top
+[L12] CAUSE: Off-by-one in range -> FIX: Change range(n) to range(n+1)
+[L20] CAUSE: Unhandled None return -> FIX: Add 'if result is None: return False'
+```
+
+No conversational fluff. Maximum signal per token. This is critical because the gradient is fed back into the LLM's context window, and every wasted token is wasted VRAM.
+
+**When does the Diagnostician activate?**
+
+Only when code **fails in the sandbox**. If the code runs successfully (exit code 0), the Diagnostician is never called. This is by design -- you don't need a doctor when you're healthy.
+
+**Current limitations (Phase 3a vs full Phase 3):**
+
+| Feature | Phase 3a (Built) | Phase 3b (Future) |
+|---------|------------------|-------------------|
+| Single-variable fix | Yes -- fix one piece of code at a time | -- |
+| Multi-variable backprop | No | Yes -- gradients flow from child to parent nodes |
+| Dynamic graph traversal | No | Yes -- walk the execution tree backward |
+| Information density scoring | Format enforced, not scored | Yes -- compute UID scores |
+| Prompt optimization | No -- only fixes code | Yes -- can also fix system prompts |
 
 ---
 
@@ -487,44 +581,44 @@ Here is the complete journey of a task through the system:
   User types: "Write a sort and filter function"
                     |
                     v
-          +-------------------+
-          |    GraphState     |
-          | {                 |
-          |   task_id: "root",|
-          |   description: ..,|
-          |   status: "init", |
-          |   children: [],   |
-          |   depth: 0        |
-          | }                 |
-          +-------------------+
+          +---------------------+
+          |    GraphState       |
+          | {                   | 
+          |   task_id: "root",  |
+          |   description: ..,  |
+          |   status: "init",   |
+          |   children: [],     |
+          |   depth: 0          |
+          | }                   |
+          +---------------------+
                     |
                     v  (init_node sets status = "planning")
                     |
                     v  (plan_node calls LLM)
                     |
-          +-------------------+
-          |  LLM Response:    |
-          |  {                |
-          |   delegate: true, |
-          |   subtasks: [     |
-          |     "Write sort", |
-          |     "Write filter"|
-          |   ]               |
-          |  }                |
-          +-------------------+
+          +---------------------+
+          |  LLM Response:      |
+          |  {                  |
+          |   delegate: true,   |
+          |   subtasks: [       |
+          |     "Write sort",   |
+          |     "Write filter"  |
+          |   ]                 |
+          |  }                  |
+          +---------------------+
                     |
                     v  (redel.py spawns 2 children)
                     |
-          +-------------------+
-          |  children: [      |
-          |    {id: "a1",     |
-          |     task: "sort", |
-          |     depth: 1},    |
-          |    {id: "b2",     |
-          |     task: "filter"|
-          |     depth: 1}     |
-          |  ]                |
-          +-------------------+
+          +---------------------+
+          |  children: [        |
+          |    {id: "a1",       |
+          |     task: "sort",   |
+          |     depth: 1},      |
+          |    {id: "b2",       |
+          |     task: "filter"  |
+          |     depth: 1}       |
+          |  ]                  |
+          +---------------------+
                     |
                     v  (execute_node per child)
                     |
@@ -541,19 +635,19 @@ Here is the complete journey of a task through the system:
                     |
                     v  (results with sandbox output)
                     |
-          +--------------------+
-          |  results: [        |
-          |    {id: "a1",      |
-          |     result: "def   |
-          |       sort(l):...",|
-          |     success: true, |
-          |     code_executed: |
-          |       true,        |
-          |     stdout: "...", |
-          |     attempts: 1},  |
-          |    ...             |
-          |  ]                 |
-          +--------------------+
+          +---------------------+
+          |  results: [         |
+          |    {id: "a1",       |
+          |     result: "def    |
+          |       sort(l):...", |
+          |     success: true,  |
+          |     code_executed:  |
+          |       true,         |
+          |     stdout: "...",  |
+          |     attempts: 1},   |
+          |    ...              |
+          |  ]                  |
+          +---------------------+
                     |
                     v  (validate_node checks sandbox results)
                     |
@@ -603,7 +697,7 @@ The full architecture (across all phases) has four layers:
 | Sandbox Pool    | `harness/sandbox.py`      | 2       | Built         |
 | VRAM Monitor    | `harness/vram_monitor.py` | 2       | Built         |
 | Event Bus       | `harness/event_bus.py`    | 2       | Built         |
-| TextGrad Engine | `engine/textgrad.py`      | 3       | Not yet built |
+| TextGrad Engine | `engine/textgrad.py`      | 3a      | Built         |
 | Dashboard       | `harness/dashboard.py`    | Future  | Not yet built |
 
 ---
@@ -616,8 +710,14 @@ LangGraph state machine + ReDel spawning logic. The root agent can decide to del
 ### Phase 2: The VRAM Shield -- DONE
 Tree-sitter-based repository maps (Repomix-style XML packing). Sandbox code execution with automatic retry on failure. Three-tier memory manager (L0/L1/L2). VRAM monitoring daemon. Event bus for engine-harness communication. Qwen 3.5 thinking mode handling.
 
-### Phase 3: TextGrad Backpropagation -- NEXT
-Textual autograd engine. Treats terminal errors as "loss functions," computes "textual gradients" (structured critiques), and backpropagates them through the execution tree to fix the agent's prompts or code. This is the hardest phase -- involves custom graph traversal, information density scoring, and dynamic gradient routing.
+### Phase 3a: The Diagnostician (TextGrad) -- DONE
+Single-variable textual backpropagation. When sandbox execution fails, the Diagnostician examines the code and error output, produces a structured LINE/CAUSE/FIX diagnosis, and applies the fix to produce corrected code. Uses PyTorch-inspired primitives (TextVariable, TextLoss, TGD optimizer). Works for both direct answers and delegated children.
+
+### Phase 3b: Full TextGrad -- FUTURE
+Multi-variable backpropagation through the execution tree. Gradients flow from child nodes back to parent prompts. Dynamic graph traversal to route gradients to the correct variable. Information density scoring on gradients.
+
+### Dashboard -- FUTURE
+Streamlit visualization for the execution tree, gradient flows, VRAM timeline, and per-node inspector. Critical for debugging Phase 3b.
 
 ---
 
@@ -666,7 +766,7 @@ RecurseForge/
 |   +-- redel.py                # Task decomposition, code extraction, retry prompts
 |   +-- llm_client.py           # OpenAI SDK wrapper with thinking mode control
 |   +-- interfaces.py           # Pydantic v2 models (all interface contracts)
-|   +-- textgrad.py             # (Phase 3) Textual backpropagation
+|   +-- textgrad.py             # TextGrad engine (TextVariable, TextLoss, TGD)
 |
 +-- context/                    # Context optimization layer
 |   +-- repo_map.py             # Tree-sitter repo map server (FastAPI)

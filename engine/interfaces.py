@@ -132,6 +132,29 @@ class TextGradient(VersionedModel):
     target_variable: str = "code_output"  # or "system_prompt"
     severity: float = Field(default=0.5, ge=0.0, le=1.0)
 
+    def to_formatted_string(self) -> str:
+        """
+        Format gradient as dense, structured text (FedTextGrad UID principle).
+
+        Each mutation is compressed into a single line:
+            [L<line>] CAUSE: <cause> -> FIX: <suggestion>
+
+        This maximizes information density per token, stripping
+        conversational fluff -- the core idea behind Uniform Information
+        Density from the FedTextGrad paper.
+        """
+        lines = []
+        for m in self.mutations:
+            if m.line > 0:
+                lines.append("[L{}] CAUSE: {} -> FIX: {}".format(
+                    m.line, m.cause, m.suggestion))
+            else:
+                lines.append("CAUSE: {} -> FIX: {}".format(
+                    m.cause, m.suggestion))
+        if lines:
+            return "\n".join(lines)
+        return self.loss_description
+
 
 # ---------------------------------------------------------------------------
 # Graph state
