@@ -19,3 +19,28 @@ recursion:
   max_depth: 3
   # Maximum number of children any single agent can spawn per level.
   max_children: 4
+
+context:
+  # Target codebase directory for the repo-map server to index.
+  # Set to "." to index the RecurseForge project itself for testing.
+  target_dir: "."
+  # Port for the repo-map FastAPI server.
+  repo_map_port: 8001
+  # Maximum tokens for the repository map overview (GET /map).
+  max_map_tokens: 1024
+
+vram:
+  # VRAM warning threshold in MB (75% of 8GB).
+  # At this level, L1 data is demoted to L2 (serialized to disk).
+  warning_mb: 6000
+  # VRAM critical threshold in MB (94% of 8GB).
+  # At this level, oldest L0 context is forcefully evicted.
+  critical_mb: 7500
+  # How often the VRAM monitor polls GPU memory (seconds).
+  poll_interval_s: 2.0
+
+sandbox:
+  # Max concurrent sandbox workers (reserved for future threading).
+  pool_size: 4
+  # Timeout per code execution (seconds).
+  timeout_s: 30

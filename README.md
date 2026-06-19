@@ -52,17 +52,17 @@ Imagine you give a complex task to a single AI. It tries to do everything at onc
                          /     |     \
                         /      |      \
                        v       v       v
-                  +---------+ +---------+ +---------+
-                  | Agent A | | Agent B | | Agent C |
-                  | Fetch   | | Parse   | | Format  |
-                  | the HTML| | the data| | to JSON |
-                  +---------+ +---------+ +---------+
-                       |           |           |
-                       v           v           v
-                   "HTML..."  "parsed..."  "JSON..."
-                       \           |           /
-                        \          |          /
-                         v         v         v
+              +---------+ +---------+ +---------+
+              | Agent A | | Agent B | | Agent C |
+              | Fetch   | | Parse   | | Format  |
+              | the HTML| | the data| | to JSON |
+              +---------+ +---------+ +---------+
+                  |           |           |
+                  v           v           v
+                "HTML..."  "parsed..."  "JSON..."
+                   \           |          /
+                    \          |         /
+                     v         v        v
                     +-------------------+
                     |    ROOT AGENT     |
                     |  (Collect results,|
@@ -87,8 +87,8 @@ Recursion is when something **calls itself** to solve a smaller piece of a bigge
 ```
          CEO: "Launch a new product"
           |
-    +-----+-----+
-    |           |
+    +-----+--------+
+    |              |
    VP Eng:    VP Sales:
    "Build     "Plan the
     the app"   launch event"
@@ -144,10 +144,10 @@ Spawning means creating a new, **independent** AI instance to handle a sub-task.
 
 ```
     Teacher: "Grade 30 essays"
-         |
-    Spawns 3 TAs
-         |
-    +----+----+
+              |
+          Spawns 3 TAs
+              |
+    +---------+---------+
     |         |         |
    TA-1      TA-2      TA-3
    Essays    Essays    Essays
@@ -193,18 +193,18 @@ else:
 LangGraph replaces this with a **graph** -- a visual, testable flow:
 
 ```
-  START
-    |
-    v
- +------+
- | Init |  Set up clean state
- +------+
-    |
-    v
- +------+
- | Plan |  LLM decides: delegate or answer?
- +------+
-    |
+              START
+                |
+                v
+            +------+
+            | Init |  Set up clean state
+            +------+
+                |
+                v
+            +------+
+            | Plan |  LLM decides: delegate or answer?
+            +------+
+                |
     +--[has children?]--+
     |                    |
     v                    v
@@ -290,11 +290,11 @@ Each node is a simple Python function that receives the current state and return
 A thin wrapper around the OpenAI Python SDK that points at a **local** llama.cpp server.
 
 ```
-  +-----------------+     HTTP      +------------------+
-  |  Python code    | ------------> |  llama.cpp       |
-  |  openai.Chat... |  localhost    |  llama-server    |
+  +-----------------+     HTTP      +-------------------+
+  |  Python code    | ------------> |  llama.cpp        |
+  |  openai.Chat... |  localhost    |  llama-server     |
   |                 |   :8080/v1    |  (your Qwen model)|
-  +-----------------+               +------------------+
+  +-----------------+               +-------------------+
 ```
 
 Why use the OpenAI SDK for a local model? Because llama.cpp exposes an **OpenAI-compatible API**. We just change the `base_url` from `api.openai.com` to `localhost:8080/v1`. This means:
@@ -313,7 +313,7 @@ The harness is the "shell" that wraps the engine. It does NOT contain any AI log
   +-------------------+          +---------------------+
   |     HARNESS       |          |       ENGINE        |
   |     (cli.py)      |          |  (graph.py +        |
-  |                   |          |   redel.py +         |
+  |                   |          |   redel.py +        |
   | - Loads config    |  calls   |   llm_client.py)    |
   | - Reads user input| -------> |                     |
   | - Invokes graph   |          | - All LLM calls     |

@@ -27,6 +27,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from engine.graph import build_graph
+from harness.event_bus import get_event_bus
+from harness.vram_monitor import VRAMMonitor
 
 
 def setup_logging(verbose: bool = False):
@@ -116,6 +118,24 @@ def main():
 
     graph = build_graph(config)
 
+    # Start event bus
+    bus = get_event_bus()
+    bus.start()
+
+    # Start VRAM monitor if config has vram section
+    vram_monitor = None
+    vram_cfg = config.get("vram", {})
+    if vram_cfg:
+        vram_monitor = VRAMMonitor(
+            warning_mb=vram_cfg.get("warning_mb", 6000),
+            critical_mb=vram_cfg.get("critical_mb", 7500),
+            poll_interval_s=vram_cfg.get("poll_interval_s", 2.0),
+        )
+        vram_monitor.start()
+        logger.info("VRAM monitor started (warning: %d MB, critical: %d MB)",
+                    vram_cfg.get("warning_mb", 6000),
+                    vram_cfg.get("critical_mb", 7500))
+
     # Get task from --flag or interactive prompt
     task = args.task
     if task is None:
@@ -151,6 +171,11 @@ def main():
         print(json.dumps(output, indent=2, default=str))
     else:
         print(format_result(result))
+
+    # Shutdown
+    if vram_monitor:
+        vram_monitor.stop()
+    bus.stop()
 
 
 if __name__ == "__main__":

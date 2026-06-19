@@ -1,4 +1,14 @@
+# Phase 1: Core engine
 langgraph>=0.4.0
 langchain-core>=0.3.0
 openai>=1.0.0
 pyyaml>=6.0
+pydantic>=2.7.4
+
+# Phase 2: Context optimization + harness
+tree-sitter>=0.23.0
+tree-sitter-python>=0.23.0
+tree-sitter-javascript>=0.23.0
+fastapi>=0.115.0
+uvicorn>=0.34.0
+tiktoken>=0.8.0

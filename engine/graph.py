@@ -23,6 +23,8 @@ from langgraph.graph import StateGraph, START, END
 
 from engine import redel
 from engine.llm_client import get_client, chat_completion
+from engine.interfaces import EngineEvent, EventType
+from harness.event_bus import get_event_bus
 
 logger = logging.getLogger("recurseforge.engine")
 
@@ -103,6 +105,17 @@ def plan_node(state: RecursionState) -> dict:
             child_ids = [c["node_id"] for c in children]
             logger.info("[PLAN] Delegating to %d children: %s",
                         len(children), child_ids)
+            # Emit NODE_SPAWN events for each child
+            bus = get_event_bus()
+            for child in children:
+                bus.emit(EngineEvent(
+                    event_type=EventType.NODE_SPAWN.value,
+                    payload={
+                        "node_id": child["node_id"],
+                        "parent_id": child["parent_id"],
+                        "task": child["task"],
+                    },
+                ))
             return {"status": "executing", "children": children}
 
     # Direct answer -- no delegation
@@ -123,6 +136,7 @@ def execute_node(state: RecursionState) -> dict:
     llm_cfg = config["llm"]
     client = get_client(llm_cfg["base_url"])
     children = state.get("children", [])
+    bus = get_event_bus()
 
     logger.info("[EXECUTE] Running %d children...", len(children))
     results = []
@@ -151,6 +165,14 @@ def execute_node(state: RecursionState) -> dict:
             })
             logger.info("[EXECUTE] Child [%s] succeeded (%d chars)",
                         child["node_id"], len(result))
+            bus.emit(EngineEvent(
+                event_type=EventType.NODE_COMPLETE.value,
+                payload={
+                    "node_id": child["node_id"],
+                    "result_summary": result[:200],
+                    "token_usage": len(result.split()),
+                },
+            ))
         except Exception as e:
             child["result"] = None
             results.append({
@@ -161,6 +183,14 @@ def execute_node(state: RecursionState) -> dict:
             })
             logger.error("[EXECUTE] Child [%s] failed: %s",
                          child["node_id"], e)
+            bus.emit(EngineEvent(
+                event_type=EventType.NODE_COMPLETE.value,
+                payload={
+                    "node_id": child["node_id"],
+                    "result_summary": str(e)[:200],
+                    "token_usage": 0,
+                },
+            ))
 
     return {"status": "validating", "results": results}
 
