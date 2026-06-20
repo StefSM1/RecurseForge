@@ -3,8 +3,8 @@
 ## Identity
 Recursive LLM agent framework. Runs Qwen 3.5 9B locally via llama.cpp on
 8GB VRAM. LangGraph state machine with dynamic sub-agent spawning (ReDel),
-token-efficient context loading, sandbox code execution, and textual
-backpropagation (Phase 3 -- not yet built).
+token-efficient context loading, sandbox code execution with TextGrad
+self-correction (Phase 3a), and full textual backpropagation (Phase 3b -- future).
 
 ## Reference Documents
 - `README.md` -- Human-readable project guide with diagrams and tutorials
@@ -41,7 +41,9 @@ START -> init_node -> plan_node --[has children?]--> execute_node -> validate_no
                                   +-> sandbox exec     2. Call LLM (with context)
                                        of direct       3. Extract Python code
                                        answer          4. Run in sandbox
-                                                       5. Retry on failure (up to max_retries)
+                                       (TextGrad if    5. If fails + textgrad enabled:
+                                        it fails)         gradient_fix() -> re-execute
+                                                       6. Else simple retry (up to max_retries)
 ```
 - `StateGraph(RecursionState)` with TypedDict state.
 - `route_after_plan`: conditional edge checking `state["children"]`.
@@ -89,6 +91,8 @@ START -> init_node -> plan_node --[has children?]--> execute_node -> validate_no
 - `NODE_SPAWN`: emitted in plan_node for each child created.
 - `NODE_COMPLETE`: emitted in execute_node after each child finishes.
   Payload includes: result_summary, code_executed, sandbox_exit_code, attempts.
+- `GRADIENT_FLOW`: emitted when TextGrad runs a gradient fix iteration.
+  Payload includes: node_id, iteration, severity, num_mutations.
 
 ### State Shape (RecursionState TypedDict)
 ```python
@@ -136,14 +140,34 @@ All extend VersionedModel with schema_version=1, .to_json(), .from_json().
 ## Phase Status
 - [x] Phase 1: Spawning Graph (LangGraph + ReDel)
 - [x] Phase 2: VRAM Shield (repo-map, sandbox, VRAM manager, event bus, retry loop)
-- [ ] Phase 3: TextGrad Backpropagation
+- [x] Phase 3a: The Diagnostician (TextGrad single-variable backpropagation)
+- [ ] Phase 3b: Full TextGrad (multi-variable backprop, dynamic graph traversal)
+- [ ] Dashboard (visualization for debugging Phase 3b)
 
-### Phase 3: TextGrad (`engine/textgrad.py`)
-- Textual autograd: treat text strings as mutable variables with "gradients."
-- Loss function: terminal errors / failed validations from sandbox.
-- Gradient: structured critique `[line] -> [cause] -> [suggestion]` (FedTextGrad UID).
+### Phase 3a: The Diagnostician (`engine/textgrad.py`) -- BUILT
+- `TextVariable`: mutable text with requires_grad, grad storage, history tracking.
+- `TextLoss`: LLM-as-judge evaluator. Calls LLM with CODE_EVAL_PROMPT requesting
+  LINE/CAUSE/FIX format. Parses critique into TextGradient with Mutations.
+  Low temperature (0.1) for precise critique.
+- `TGD`: Textual Gradient Descent optimizer. Applies gradients via LLM with
+  UPDATE_PROMPT. Low temperature (0.2) for faithful application.
+- `gradient_fix()`: one-shot API wrapping evaluate -> backward -> step loop.
+  Returns (fixed_code, gradient_log).
+- Integration: execute_node checks `config.textgrad.enabled`. When enabled,
+  failed sandbox calls use gradient_fix() instead of simple retry. Falls back
+  to simple retry if TextGrad itself fails. Also wired into plan_node for
+  direct answers with code.
+- `TextGradient.to_formatted_string()` produces UID format:
+  `[L4] CAUSE: missing import -> FIX: add 'import os' at top`
+- Config: `textgrad.enabled` (default false), `max_iterations` (1),
+  `eval_temperature` (0.1), `update_temperature` (0.2).
+- Evaluator and updater use DIFFERENT prompts (separation of concerns).
+
+### Phase 3b: Full TextGrad -- FUTURE
+- Multi-variable backprop: gradients flow from child nodes to parent prompts.
 - Dynamic graph traversal: walk execution tree backward to route gradients.
-- Mutate target_variable (system_prompt or code_output) and re-run.
+- Information density scoring: compute UID scores on gradient text.
+- Prompt optimization: can also mutate system_prompt, not just code.
 
 ## File Structure
 ```
@@ -153,7 +177,7 @@ RecurseForge/
     redel.py          # Spawning, code extraction, retry prompts
     llm_client.py     # OpenAI SDK wrapper with thinking mode control
     interfaces.py     # Pydantic v2 models (all contracts)
-    textgrad.py       # (Phase 3) Textual backpropagation engine
+    textgrad.py       # TextGrad engine (TextVariable, TextLoss, TGD) -- Phase 3a
   context/
     repo_map.py       # Tree-sitter repo map FastAPI server
     vram_manager.py   # L0/L1/L2 tiered memory manager

@@ -85,6 +85,8 @@ class SandboxPool:
                 text=True,
                 timeout=timeout,
                 cwd=str(self._temp_dir),
+                encoding="utf-8",
+                errors="replace",
                 env={
                     "PATH": os.environ.get("PATH", ""),
                     "PYTHONPATH": "",
@@ -92,6 +94,8 @@ class SandboxPool:
                     "TEMP": str(self._temp_dir),
                     "TMP": str(self._temp_dir),
                     "SYSTEMROOT": os.environ.get("SYSTEMROOT", ""),
+                    "PYTHONIOENCODING": "utf-8",
+                    "PYTHONUTF8": "1",
                 },
             )
             result = ExecutionResult(

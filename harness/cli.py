@@ -1,21 +1,30 @@
 """
 harness/cli.py
 ===============
-Minimal CLI entry point for RecurseForge.
+CLI entry point for RecurseForge.
 
 Usage:
-    python -m harness.cli                          # interactive prompt
-    python -m harness.cli --task "Write a poem"     # one-shot task
-    python -m harness.cli --config path/to/cfg.yaml # custom config
+    python -m harness.cli                              # interactive prompt
+    python -m harness.cli --task "Write a poem"          # one-shot task
+    python -m harness.cli --task "..." --dashboard       # full dashboard (auto-starts frontend + backend + browser)
+    python -m harness.cli --config path/to/cfg.yaml      # custom config
 
-The CLI loads config.yaml, builds the LangGraph state machine, sends
-your task through it, and prints the result.
+The --dashboard flag automatically:
+    1. Kills any existing sessions on ports 8100 and 5173
+    2. Starts the backend (FastAPI) on port 8100 in a background thread
+    3. Starts the frontend (Vite) on port 5173 as a subprocess
+    4. Opens the dashboard in your default browser
+    5. Cleans up both servers on exit
 """
 
 import argparse
 import json
 import logging
+import os
+import subprocess
 import sys
+import time
+import webbrowser
 from pathlib import Path
 
 import yaml
@@ -121,6 +130,10 @@ def main():
         "--json", action="store_true", dest="output_json",
         help="Output raw JSON state instead of formatted text",
     )
+    parser.add_argument(
+        "--dashboard", action="store_true",
+        help="Start the dashboard server alongside the engine (shared event bus)",
+    )
     args = parser.parse_args()
 
     setup_logging(verbose=args.verbose)
@@ -138,6 +151,56 @@ def main():
     # Start event bus
     bus = get_event_bus()
     bus.start()
+
+    # Start dashboard (backend + frontend + browser) if requested
+    dashboard_thread = None
+    vite_process = None
+    if args.dashboard:
+        import threading
+        import uvicorn
+        from harness.dashboard_server import app as dashboard_app
+
+        # --- Kill old sessions ---
+        _kill_port(8100)
+        _kill_port(5173)
+
+        # --- Start backend (FastAPI) in a background thread ---
+        def run_dashboard():
+            uvicorn.run(dashboard_app, host="127.0.0.1", port=8100,
+                        log_level="warning")
+
+        dashboard_thread = threading.Thread(target=run_dashboard, daemon=True,
+                                            name="dashboard-server")
+        dashboard_thread.start()
+        logger.info("Dashboard backend started on http://127.0.0.1:8100")
+
+        # --- Start frontend (Vite dev server) as a subprocess ---
+        dashboard_dir = PROJECT_ROOT / "dashboard"
+        if dashboard_dir.exists():
+            try:
+                # On Windows, npx is a .cmd file and needs shell=True
+                use_shell = sys.platform == "win32"
+                vite_process = subprocess.Popen(
+                    ["npx", "vite", "--host", "--port", "5173"],
+                    cwd=str(dashboard_dir),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    shell=use_shell,
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                    if sys.platform == "win32" and not use_shell else 0,
+                )
+                # Wait for Vite to be ready
+                _wait_for_port(5173, timeout=15)
+                logger.info("Dashboard frontend started on http://localhost:5173")
+
+                # Open browser
+                webbrowser.open("http://localhost:5173")
+                logger.info("Opened dashboard in browser")
+            except Exception as e:
+                logger.warning("Could not start Vite frontend: %s", e)
+                logger.info("Open http://localhost:5173 manually to view the dashboard")
+        else:
+            logger.warning("Dashboard directory not found: %s", dashboard_dir)
 
     # Start VRAM monitor if config has vram section
     vram_monitor = None
@@ -189,6 +252,17 @@ def main():
     else:
         print(format_result(result))
 
+    # If dashboard mode, keep running until user exits via dashboard Exit button or Ctrl+C
+    if args.dashboard:
+        logger.info("Task complete. Dashboard remains active.")
+        logger.info("Use the Exit button in the dashboard or press Ctrl+C to stop.")
+        try:
+            # Block until interrupted
+            import signal
+            signal.pause() if sys.platform != "win32" else input()
+        except (KeyboardInterrupt, EOFError):
+            pass
+
     # Shutdown
     from engine.graph import _sandbox_pool
     if _sandbox_pool is not None:
@@ -196,6 +270,52 @@ def main():
     if vram_monitor:
         vram_monitor.stop()
     bus.stop()
+    if vite_process:
+        vite_process.terminate()
+        try:
+            vite_process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            vite_process.kill()
+        logger.info("Dashboard frontend stopped")
+
+
+def _kill_port(port: int):
+    """Kill any process listening on the given port (Windows and Linux)."""
+    try:
+        if sys.platform == "win32":
+            result = subprocess.run(
+                ["netstat", "-ano"],
+                capture_output=True, text=True, timeout=5,
+            )
+            for line in result.stdout.splitlines():
+                if ":{} ".format(port) in line and "LISTENING" in line:
+                    parts = line.split()
+                    if parts:
+                        pid = int(parts[-1])
+                        subprocess.run(
+                            ["taskkill", "/f", "/pid", str(pid)],
+                            capture_output=True, timeout=5,
+                        )
+        else:
+            subprocess.run(
+                ["fuser", "-k", "{}/tcp".format(port)],
+                capture_output=True, timeout=5,
+            )
+    except Exception:
+        pass
+
+
+def _wait_for_port(port: int, timeout: float = 15):
+    """Wait until a port is accepting connections."""
+    import socket
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=1):
+                return
+        except (ConnectionRefusedError, OSError):
+            time.sleep(0.3)
+    raise TimeoutError("Port {} not ready after {}s".format(port, timeout))
 
 
 if __name__ == "__main__":

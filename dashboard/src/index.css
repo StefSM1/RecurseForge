@@ -1,0 +1,41 @@
+@import "tailwindcss";
+
+@theme {
+  --color-panel: oklch(0.18 0.01 260);
+  --color-panel-light: oklch(0.22 0.01 260);
+  --color-surface: oklch(0.14 0.01 260);
+  --color-border: oklch(0.28 0.01 260);
+  --color-text-primary: oklch(0.93 0.01 260);
+  --color-text-secondary: oklch(0.65 0.02 260);
+  --color-accent-blue: oklch(0.7 0.15 250);
+  --color-accent-green: oklch(0.75 0.15 150);
+  --color-accent-red: oklch(0.7 0.18 25);
+  --color-accent-yellow: oklch(0.8 0.15 85);
+  --color-accent-purple: oklch(0.65 0.2 300);
+  --font-sans: 'Inter', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+/* Override ReactFlow default node backgrounds to match dark theme */
+.react-flow__node {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  padding: 0 !important;
+}
+
+.react-flow__node:focus,
+.react-flow__node:focus-visible {
+  outline: none !important;
+}
+
+/* Edge styling */
+.react-flow__edge-path {
+  stroke-width: 2;
+}
