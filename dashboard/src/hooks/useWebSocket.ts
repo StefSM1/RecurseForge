@@ -102,41 +102,50 @@ export function useWebSocket(url: string = '/ws') {
     })
   }, [])
 
-  const connect = useCallback(() => {
-    const ws = new WebSocket(backendWsUrl)
-    wsRef.current = ws
+  useEffect(() => {
+    let active = true
 
-    ws.onopen = () => {
-      setState(prev => ({ ...prev, connected: true, error: null }))
-    }
+    function connect() {
+      if (!active) return
 
-    ws.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data) as EngineEvent
-        handleEvent(data)
-      } catch {
-        // Skip malformed messages
+      const ws = new WebSocket(backendWsUrl)
+      wsRef.current = ws
+
+      ws.onopen = () => {
+        setState(prev => ({ ...prev, connected: true, error: null }))
+      }
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data) as EngineEvent
+          handleEvent(data)
+        } catch {
+          // Skip malformed messages
+        }
+      }
+
+      ws.onerror = () => {
+        setState(prev => ({ ...prev, error: 'WebSocket error' }))
+      }
+
+      ws.onclose = () => {
+        if (wsRef.current === ws) wsRef.current = null
+        if (!active) return
+
+        setState(prev => ({ ...prev, connected: false }))
+        reconnectTimerRef.current = setTimeout(connect, 3000)
       }
     }
 
-    ws.onerror = () => {
-      setState(prev => ({ ...prev, error: 'WebSocket error' }))
-    }
-
-    ws.onclose = () => {
-      setState(prev => ({ ...prev, connected: false }))
-      // Reconnect after 3 seconds
-      reconnectTimerRef.current = setTimeout(connect, 3000)
-    }
-  }, [backendWsUrl, handleEvent])
-
-  useEffect(() => {
     connect()
     return () => {
+      active = false
       clearTimeout(reconnectTimerRef.current)
-      wsRef.current?.close()
+      const ws = wsRef.current
+      wsRef.current = null
+      ws?.close()
     }
-  }, [connect])
+  }, [backendWsUrl, handleEvent])
 
   const clearHistory = useCallback(() => {
     setState(prev => ({

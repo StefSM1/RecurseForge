@@ -39,3 +39,47 @@ html, body, #root {
 .react-flow__edge-path {
   stroke-width: 2;
 }
+
+/* Scoped information-wire layers; unrelated ReactFlow edges are unaffected. */
+.info-line__background {
+  filter: drop-shadow(0 0 4px rgba(249, 115, 22, 0.18));
+}
+
+.info-line__main {
+  pointer-events: none;
+  filter: drop-shadow(0 0 3px rgba(249, 115, 22, 0.42));
+}
+
+.info-line__flow {
+  pointer-events: none;
+  stroke: rgba(255, 213, 170, 0.72);
+  stroke-width: 1.35;
+  stroke-linecap: round;
+  stroke-dasharray: 7 22;
+  animation: info-line-flow 2.8s linear infinite;
+  filter: drop-shadow(0 0 2px rgba(255, 177, 92, 0.45));
+}
+
+.info-line__pulse {
+  pointer-events: none;
+  fill: rgba(255, 190, 115, 0.32);
+  filter: drop-shadow(0 0 3px rgba(249, 115, 22, 0.38));
+}
+
+@keyframes info-line-flow {
+  to {
+    stroke-dashoffset: -58;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .info-line__flow,
+  .info-line__pulse {
+    display: none;
+  }
+
+  .info-line__main,
+  .info-line__background {
+    filter: none;
+  }
+}
