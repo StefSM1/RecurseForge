@@ -4,19 +4,21 @@ import NodeDetailPanel from './components/NodeDetailPanel'
 import ResourceMonitor from './components/ResourceMonitor'
 import { useWebSocket } from './hooks/useWebSocket'
 import { BACKEND_BASE_URL } from './config'
-import type { AgentNode } from './types/events'
+import type { GraphEntity } from './types/events'
 
 type Tab = 'agents' | 'resources'
-type RootStatus = 'offline' | 'running' | 'success'
+type RootStatus = 'offline' | 'running' | 'success' | 'error'
 type OutputStatus = 'waiting' | 'success' | 'error'
 
 function App() {
   const [activeTab, setActiveTab] = useState<Tab>('agents')
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
+  const [selection, setSelection] = useState<{
+    kind: GraphEntity['kind']; id: string
+  } | null>(null)
   const [showRootPrompt, setShowRootPrompt] = useState(false)
   const [showOutputDetail, setShowOutputDetail] = useState(false)
 
-  const { connected, nodes, events } = useWebSocket()
+  const { connected, run, nodes, sandboxRuns, corrections, events } = useWebSocket()
 
   // Poll VRAM for summary bar
   const [vramMb, setVramMb] = useState<number>(0)
@@ -44,35 +46,67 @@ function App() {
 
     // Root status
     let rootStatus: RootStatus = 'offline'
-    if (hasSpawnEvents && !allComplete) rootStatus = 'running'
+    if (run) {
+      rootStatus = run.status === 'failed' ? 'error' : run.status
+    } else if (hasSpawnEvents && !allComplete) rootStatus = 'running'
     else if (hasCompleteEvents || allComplete) rootStatus = 'success'
     else if (events.length > 0) rootStatus = 'running'
 
     // Root task (from first spawn event's parent context)
-    const rootTask = events.length > 0 ? 'Task received' : ''
+    const rootTask = run?.task || (events.length > 0 ? 'Task received' : '')
 
     // Output status
     let outputStatus: OutputStatus = 'waiting'
-    if (allComplete) {
+    if (run && run.status !== 'running') {
+      outputStatus = run.status === 'failed' ? 'error' : 'success'
+    } else if (allComplete) {
       const anyFailed = Array.from(nodes.values()).some(n => n.status === 'failed')
       outputStatus = anyFailed ? 'error' : 'success'
     }
 
     // Output summary
     const successNodes = Array.from(nodes.values()).filter(n => n.status === 'success')
-    const outputSummary = successNodes.length > 0
+    const outputSummary = run?.resultSummary || (successNodes.length > 0
       ? `${successNodes.length} task${successNodes.length > 1 ? 's' : ''} completed`
-      : ''
+      : '')
 
     return { rootStatus, rootTask, outputStatus, outputSummary }
-  }, [events, nodes])
+  }, [events, nodes, run])
 
-  const selectedNode: AgentNode | null = selectedNodeId
-    ? nodes.get(selectedNodeId) ?? null
-    : null
+  const selectedEntity: GraphEntity | null = useMemo(() => {
+    if (!selection) return null
+    if (selection.kind === 'agent') {
+      const value = nodes.get(selection.id)
+      return value ? { kind: 'agent', value } : null
+    }
+    if (selection.kind === 'sandbox') {
+      const value = sandboxRuns.get(selection.id)
+      return value ? { kind: 'sandbox', value } : null
+    }
+    const value = corrections.get(selection.id)
+    return value ? { kind: 'correction', value } : null
+  }, [selection, nodes, sandboxRuns, corrections])
 
   const handleNodeClick = useCallback((nodeId: string) => {
-    setSelectedNodeId(prev => prev === nodeId ? null : nodeId)
+    setSelection(previous => previous?.kind === 'agent' && previous.id === nodeId
+      ? null
+      : { kind: 'agent', id: nodeId })
+    setShowRootPrompt(false)
+    setShowOutputDetail(false)
+  }, [])
+
+  const handleSandboxClick = useCallback((sandboxId: string) => {
+    setSelection(previous => previous?.kind === 'sandbox' && previous.id === sandboxId
+      ? null
+      : { kind: 'sandbox', id: sandboxId })
+    setShowRootPrompt(false)
+    setShowOutputDetail(false)
+  }, [])
+
+  const handleCorrectionClick = useCallback((correctionId: string) => {
+    setSelection(previous => previous?.kind === 'correction' && previous.id === correctionId
+      ? null
+      : { kind: 'correction', id: correctionId })
     setShowRootPrompt(false)
     setShowOutputDetail(false)
   }, [])
@@ -80,13 +114,13 @@ function App() {
   const handleRootClick = useCallback(() => {
     setShowRootPrompt(prev => !prev)
     setShowOutputDetail(false)
-    setSelectedNodeId(null)
+    setSelection(null)
   }, [])
 
   const handleOutputClick = useCallback(() => {
     setShowOutputDetail(prev => !prev)
     setShowRootPrompt(false)
-    setSelectedNodeId(null)
+    setSelection(null)
   }, [])
 
   // Summary stats
@@ -183,7 +217,12 @@ function App() {
             <>
               <AgentTree
                 nodes={nodes}
+                sandboxRuns={sandboxRuns}
+                corrections={corrections}
+                run={run}
                 onNodeClick={handleNodeClick}
+                onSandboxClick={handleSandboxClick}
+                onCorrectionClick={handleCorrectionClick}
                 rootStatus={rootStatus}
                 rootTask={rootTask}
                 outputStatus={outputStatus}
@@ -192,8 +231,8 @@ function App() {
                 onOutputClick={handleOutputClick}
               />
               <NodeDetailPanel
-                node={selectedNode}
-                onClose={() => setSelectedNodeId(null)}
+                entity={selectedEntity}
+                onClose={() => setSelection(null)}
               />
               {/* Root prompt overlay */}
               {showRootPrompt && (
@@ -288,6 +327,10 @@ function App() {
           <div className="flex items-center gap-2">
             <span className="text-xs text-text-secondary">Events:</span>
             <span className="text-xs text-text-primary font-mono">{events.length}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-text-secondary">Sandbox:</span>
+            <span className="text-xs text-accent-yellow font-mono">{sandboxRuns.size}</span>
           </div>
           <div className="ml-auto flex items-center gap-2">
             <span className="text-xs text-text-secondary">VRAM:</span>

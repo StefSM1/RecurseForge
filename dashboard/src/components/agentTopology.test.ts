@@ -3,9 +3,9 @@ import type { AgentNode, AgentStatus } from '../types/events'
 import {
   EDGE_DRAW_DURATION_MS,
   EDGE_STAGGER_MS,
+  AnimationRegistry,
   buildExecutionEdges,
   buildLayoutEdges,
-  isAnimationPending,
 } from './agentTopology'
 
 function agent(
@@ -133,11 +133,16 @@ describe('buildExecutionEdges', () => {
     ])
   })
 
-  it('guards completed animation IDs from replaying', () => {
-    const completed = new Set<string>()
-    expect(isAnimationPending(completed, 'flow-root-a')).toBe(true)
-    completed.add('flow-root-a')
-    expect(isAnimationPending(completed, 'flow-root-a')).toBe(false)
+  it('guards completed edges and revealed nodes from replaying', () => {
+    const registry = new AnimationRegistry()
+    expect(registry.shouldAnimateEdge('flow-root-a')).toBe(true)
+    expect(registry.shouldRevealNode('a')).toBe(true)
+
+    registry.markEdgeDrawn('flow-root-a')
+    registry.markNodeRevealed('a')
+
+    expect(registry.shouldAnimateEdge('flow-root-a')).toBe(false)
+    expect(registry.shouldRevealNode('a')).toBe(false)
   })
 
   it('keeps pending result connections available to the layout only', () => {

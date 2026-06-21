@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import enum
 import json
+import time
+import uuid
 from typing import Any, Optional
 
 
@@ -66,8 +68,15 @@ class CommandType(str, enum.Enum):
 
 
 class EventType(str, enum.Enum):
+    RUN_STARTED = "run_started"
+    RUN_COMPLETED = "run_completed"
     NODE_SPAWN = "node_spawn"
     NODE_COMPLETE = "node_complete"
+    SANDBOX_STARTED = "sandbox_started"
+    SANDBOX_COMPLETED = "sandbox_completed"
+    CORRECTION_STARTED = "correction_started"
+    CORRECTION_PROGRESS = "correction_progress"
+    CORRECTION_COMPLETED = "correction_completed"
     GRADIENT_FLOW = "gradient_flow"
     VRAM_ALERT = "vram_alert"
 
@@ -168,6 +177,7 @@ class GraphState(VersionedModel):
     itself operates on plain dicts (converted via model_dump()).
     """
     task_id: str = "root"
+    run_id: str | None = None
     task_description: str = ""
     status: str = GraphStatus.INIT.value
     children: list[dict[str, Any]] = Field(default_factory=list)
@@ -190,5 +200,8 @@ class HarnessCommand(VersionedModel):
 
 class EngineEvent(VersionedModel):
     """Engine -> harness telemetry signal."""
+    event_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    run_id: str | None = None
+    timestamp: float = Field(default_factory=time.time)
     event_type: str  # EventType value
     payload: dict[str, Any] = Field(default_factory=dict)

@@ -483,6 +483,7 @@ def gradient_fix(
     eval_temperature: float = 0.1,
     update_temperature: float = 0.2,
     max_tokens: int = 2048,
+    progress_callback: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> tuple[str, list[dict]]:
     """
     One-shot gradient fix: evaluate code, compute gradient, apply it.
@@ -529,8 +530,16 @@ def gradient_fix(
 
     gradient_log = []
 
+    def report(phase: str, **details: Any) -> None:
+        if progress_callback is not None:
+            try:
+                progress_callback(phase, details)
+            except Exception as exc:
+                logger.warning("[TextGrad] Progress callback failed: %s", exc)
+
     for iteration in range(max_iterations):
         # Forward: compute loss (evaluate current code)
+        report("evaluating_loss", iteration=iteration + 1)
         gradient = loss_fn(
             code_var,
             context={
@@ -553,13 +562,22 @@ def gradient_fix(
                 for m in gradient.mutations
             ],
         })
+        report(
+            "gradient_ready",
+            iteration=iteration + 1,
+            severity=gradient.severity,
+            num_mutations=len(gradient.mutations),
+            mutations=gradient_log[-1]["mutations"],
+        )
 
         logger.info("[TextGrad] Iteration %d/%d: severity=%.2f, %d mutations",
                     iteration + 1, max_iterations,
                     gradient.severity, len(gradient.mutations))
 
         # Step: apply gradient
+        report("applying_update", iteration=iteration + 1)
         optimizer.step()
+        report("iteration_complete", iteration=iteration + 1)
 
         # If gradient was low severity, stop early
         if gradient.severity < 0.2:

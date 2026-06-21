@@ -8,19 +8,50 @@ export interface ExecutionEdge {
   data: ExecutionEdgeData
 }
 
-export type ExecutionEdgePhase = 'direct' | 'spawn' | 'result'
+export type ExecutionEdgePhase =
+  | 'direct'
+  | 'spawn'
+  | 'result'
+  | 'sandbox'
+  | 'diagnostic'
+  | 'correction'
+  | 'failure'
+
+export type ExecutionEdgeTone = 'orange' | 'purple' | 'amber' | 'red'
 
 export interface ExecutionEdgeData extends Record<string, unknown> {
   phase: ExecutionEdgePhase
   delayMs: number
   durationMs: number
+  tone?: ExecutionEdgeTone
 }
 
 const ROOT_ID = 'root'
 const OUTPUT_ID = 'output'
 export const EDGE_DRAW_DURATION_MS = 900
 export const EDGE_STAGGER_MS = 80
-export const NODE_REVEAL_LEAD_MS = 80
+export const NODE_REVEAL_LEAD_MS = 40
+
+export class AnimationRegistry {
+  private readonly drawnEdgeIds = new Set<string>()
+  private readonly revealedNodeIds = new Set<string>()
+
+  shouldAnimateEdge(edgeId: string): boolean {
+    return !this.drawnEdgeIds.has(edgeId)
+  }
+
+  shouldRevealNode(nodeId: string): boolean {
+    return !this.revealedNodeIds.has(nodeId)
+  }
+
+  markEdgeDrawn(edgeId: string): void {
+    this.drawnEdgeIds.add(edgeId)
+  }
+
+  markNodeRevealed(nodeId: string): void {
+    this.revealedNodeIds.add(nodeId)
+  }
+}
 
 function edge(
   source: string,
@@ -111,8 +142,4 @@ export function buildExecutionEdges(agents: AgentNode[]): ExecutionEdge[] {
 /** Keep output positioned beneath leaves before their result wires are visible. */
 export function buildLayoutEdges(agents: AgentNode[]): ExecutionEdge[] {
   return buildEdges(agents, true)
-}
-
-export function isAnimationPending(completedIds: ReadonlySet<string>, id: string): boolean {
-  return !completedIds.has(id)
 }

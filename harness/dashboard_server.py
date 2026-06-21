@@ -278,19 +278,15 @@ def _start_event_bus_bridge():
 
         def on_event(event):
             """Callback from event bus dispatcher thread -> put into queue."""
-            event_dict = {
-                "event_type": event.event_type,
-                "payload": event.payload,
-                "timestamp": time.time(),
-            }
+            event_dict = event.model_dump(mode="json")
             _event_queue.put(event_dict)
             logger.debug("[Dashboard] Bridge: queued event %s", event.event_type)
 
-        for event_type in [EventType.NODE_SPAWN, EventType.NODE_COMPLETE,
-                           EventType.GRADIENT_FLOW, EventType.VRAM_ALERT]:
+        for event_type in EventType:
             bus.subscribe(event_type.value, on_event)
 
-        logger.info("[Dashboard] Event bus bridge started (subscribed to 4 event types)")
+        logger.info("[Dashboard] Event bus bridge started (subscribed to %d event types)",
+                    len(EventType))
     except ImportError as e:
         logger.warning("[Dashboard] Could not connect to event bus: %s. "
                        "Dashboard will work without live events.", e)

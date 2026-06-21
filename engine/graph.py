@@ -17,6 +17,7 @@ and either continues to Execute or skips to the end.
 """
 
 import logging
+import uuid
 from typing import TypedDict
 
 from langgraph.graph import StateGraph, START, END
@@ -29,6 +30,30 @@ from harness.sandbox import SandboxPool
 from engine.textgrad import gradient_fix
 
 logger = logging.getLogger("recurseforge.engine")
+
+_PREVIEW_LIMIT = 500
+
+
+def _emit(event_type: EventType, run_id: str, payload: dict) -> None:
+    """Emit one run-scoped telemetry event with engine time and stable ID."""
+    get_event_bus().emit(EngineEvent(
+        run_id=run_id,
+        event_type=event_type.value,
+        payload=payload,
+    ))
+
+
+def _run_id(state: "RecursionState") -> str:
+    return state.get("run_id") or state["task_id"]
+
+
+def _execution_id(owner_id: str, attempt: int) -> str:
+    return "sandbox-{}-{}-{}".format(owner_id, attempt, uuid.uuid4().hex[:8])
+
+
+def _correction_id(owner_id: str, attempt: int, strategy: str) -> str:
+    return "correction-{}-{}-{}-{}".format(
+        owner_id, attempt, strategy, uuid.uuid4().hex[:8])
 
 # ---------------------------------------------------------------------------
 # Repo-map client (optional -- used if repo-map server is running)
@@ -84,6 +109,7 @@ def _get_sandbox(config: dict) -> SandboxPool:
 class RecursionState(TypedDict):
     """The state object that flows through the LangGraph state machine."""
     task_id: str
+    run_id: str
     task_description: str
     status: str               # "init" | "planning" | "executing" | "validating" | "done"
     children: list            # list of child node dicts (from redel.spawn_children)
@@ -102,11 +128,17 @@ def init_node(state: RecursionState) -> dict:
     Entry point. Just ensures clean initial values.
     """
     logger.info("[INIT] Task: %s", state["task_description"][:80])
+    run_id = state.get("run_id") or str(uuid.uuid4())
+    _emit(EventType.RUN_STARTED, run_id, {
+        "task": state["task_description"],
+        "mode": "unknown",
+    })
     return {
         "status": "planning",
         "children": [],
         "results": [],
         "direct_answer": "",
+        "run_id": run_id,
     }
 
 
@@ -132,14 +164,25 @@ def plan_node(state: RecursionState) -> dict:
     logger.info("[PLAN] Depth %d/%d -- Asking LLM to plan...",
                 state["depth"], rec_cfg["max_depth"])
 
-    llm_output = chat_completion(
-        client=client,
-        model=llm_cfg["model_name"],
-        messages=messages,
-        max_tokens=llm_cfg["max_tokens"],
-        temperature=llm_cfg["temperature"],
-        no_think=True,  # Planning step: disable thinking, we just need JSON
-    )
+    run_id = _run_id(state)
+    try:
+        llm_output = chat_completion(
+            client=client,
+            model=llm_cfg["model_name"],
+            messages=messages,
+            max_tokens=llm_cfg["max_tokens"],
+            temperature=llm_cfg["temperature"],
+            no_think=True,  # Planning step: disable thinking, we just need JSON
+        )
+    except Exception as exc:
+        logger.error("[PLAN] LLM call failed: %s", exc)
+        message = "Planning failed: {}".format(exc)
+        _emit(EventType.RUN_COMPLETED, run_id, {
+            "success": False,
+            "mode": "direct",
+            "result_summary": message[:200],
+        })
+        return {"status": "done", "direct_answer": message}
 
     plan_response = redel.parse_plan_response(llm_output)
 
@@ -155,16 +198,12 @@ def plan_node(state: RecursionState) -> dict:
             logger.info("[PLAN] Delegating to %d children: %s",
                         len(children), child_ids)
             # Emit NODE_SPAWN events for each child
-            bus = get_event_bus()
             for child in children:
-                bus.emit(EngineEvent(
-                    event_type=EventType.NODE_SPAWN.value,
-                    payload={
-                        "node_id": child["node_id"],
-                        "parent_id": child["parent_id"],
-                        "task": child["task"],
-                    },
-                ))
+                _emit(EventType.NODE_SPAWN, run_id, {
+                    "node_id": child["node_id"],
+                    "parent_id": child["parent_id"],
+                    "task": child["task"],
+                })
             return {"status": "executing", "children": children}
 
     # Direct answer -- no delegation
@@ -173,11 +212,19 @@ def plan_node(state: RecursionState) -> dict:
 
     # Even for direct answers, extract and execute code if present
     code = redel.extract_python_code(answer)
+    direct_success = True
     if code:
         logger.info("[PLAN] Direct answer contains code (%d chars), "
                     "executing in sandbox...", len(code))
         sandbox = _get_sandbox(state["config"])
-        exec_result = sandbox.execute("direct", code)
+        direct_execution_id = _execution_id("root", 1)
+        exec_result = sandbox.execute(
+            "root", code,
+            run_id=run_id,
+            execution_id=direct_execution_id,
+            attempt=1,
+            trigger="initial",
+        )
         if exec_result.exit_code == 0:
             logger.info("[PLAN] Direct code execution OK (stdout: %d chars)",
                         len(exec_result.stdout))
@@ -190,6 +237,14 @@ def plan_node(state: RecursionState) -> dict:
             tg_cfg = state["config"].get("textgrad", {})
             if tg_cfg.get("enabled", False):
                 logger.info("[PLAN] Using TextGrad to fix direct answer code...")
+                correction_id = _correction_id("root", 2, "textgrad")
+                _emit(EventType.CORRECTION_STARTED, run_id, {
+                    "correction_id": correction_id,
+                    "owner_node_id": "root",
+                    "failed_execution_id": direct_execution_id,
+                    "attempt": 2,
+                    "strategy": "textgrad",
+                })
                 try:
                     error_msg = exec_result.stderr or "Exit code: {}".format(
                         exec_result.exit_code)
@@ -204,9 +259,26 @@ def plan_node(state: RecursionState) -> dict:
                         eval_temperature=tg_cfg.get("eval_temperature", 0.1),
                         update_temperature=tg_cfg.get("update_temperature", 0.2),
                         max_tokens=llm_cfg["max_tokens"],
+                        progress_callback=lambda phase, details: _emit(
+                            EventType.CORRECTION_PROGRESS, run_id, {
+                                "correction_id": correction_id,
+                                "phase": "completed" if phase == "iteration_complete" else phase,
+                                **details,
+                            }),
                     )
+                    _emit(EventType.CORRECTION_COMPLETED, run_id, {
+                        "correction_id": correction_id,
+                        "success": True,
+                        "iterations": len(grad_log),
+                    })
                     # Re-execute the fixed code
-                    exec_result2 = sandbox.execute("direct_fixed", fixed_code)
+                    exec_result2 = sandbox.execute(
+                        "root", fixed_code,
+                        run_id=run_id,
+                        execution_id=_execution_id("root", 2),
+                        attempt=2,
+                        trigger="textgrad",
+                    )
                     if exec_result2.exit_code == 0:
                         logger.info("[PLAN] TextGrad fixed the code! (stdout: %d chars)",
                                     len(exec_result2.stdout))
@@ -215,16 +287,78 @@ def plan_node(state: RecursionState) -> dict:
                                    + "\n\n--- Sandbox Output (after fix) ---\n"
                                    + exec_result2.stdout)
                     else:
+                        direct_success = False
                         logger.warning("[PLAN] TextGrad fix still failed: %s",
                                        exec_result2.stderr[:200])
                         answer += ("\n\n--- Sandbox Error (after TextGrad attempt) ---\n"
                                    + exec_result2.stderr)
                 except Exception as e:
                     logger.error("[PLAN] TextGrad failed: %s", e)
-                    answer += "\n\n--- Sandbox Error ---\n" + exec_result.stderr
+                    _emit(EventType.CORRECTION_COMPLETED, run_id, {
+                        "correction_id": correction_id,
+                        "success": False,
+                        "error": str(e)[:_PREVIEW_LIMIT],
+                    })
+                    retry_id = _correction_id("root", 2, "llm_retry")
+                    _emit(EventType.CORRECTION_STARTED, run_id, {
+                        "correction_id": retry_id,
+                        "owner_node_id": "root",
+                        "failed_execution_id": direct_execution_id,
+                        "attempt": 2,
+                        "strategy": "llm_retry",
+                    })
+                    _emit(EventType.CORRECTION_PROGRESS, run_id, {
+                        "correction_id": retry_id,
+                        "phase": "requesting_retry",
+                    })
+                    try:
+                        retry_response = chat_completion(
+                            client=client,
+                            model=llm_cfg["model_name"],
+                            messages=redel.build_retry_messages(
+                                state["task_description"], code,
+                                exec_result.stderr or str(exec_result.exit_code)),
+                            max_tokens=llm_cfg["max_tokens"],
+                            temperature=llm_cfg["temperature"],
+                        )
+                        retry_code = redel.extract_python_code(retry_response)
+                        if not retry_code:
+                            raise ValueError("Retry response contained no Python code")
+                        _emit(EventType.CORRECTION_COMPLETED, run_id, {
+                            "correction_id": retry_id,
+                            "success": True,
+                        })
+                        retry_result = sandbox.execute(
+                            "root", retry_code,
+                            run_id=run_id,
+                            execution_id=_execution_id("root", 2),
+                            attempt=2,
+                            trigger="llm_retry",
+                        )
+                        direct_success = retry_result.exit_code == 0
+                        if direct_success:
+                            answer += ("\n\n--- LLM Retry Fixed Code ---\n" + retry_code
+                                       + "\n\n--- Sandbox Output (after retry) ---\n"
+                                       + retry_result.stdout)
+                        else:
+                            answer += "\n\n--- Sandbox Error (after retry) ---\n" + retry_result.stderr
+                    except Exception as retry_exc:
+                        direct_success = False
+                        _emit(EventType.CORRECTION_COMPLETED, run_id, {
+                            "correction_id": retry_id,
+                            "success": False,
+                            "error": str(retry_exc)[:_PREVIEW_LIMIT],
+                        })
+                        answer += "\n\n--- Sandbox Error ---\n" + exec_result.stderr
             else:
+                direct_success = False
                 answer += "\n\n--- Sandbox Error ---\n" + exec_result.stderr
 
+    _emit(EventType.RUN_COMPLETED, run_id, {
+        "success": direct_success,
+        "mode": "direct",
+        "result_summary": answer[:200],
+    })
     return {"status": "done", "direct_answer": answer}
 
 
@@ -245,7 +379,7 @@ def execute_node(state: RecursionState) -> dict:
     llm_cfg = config["llm"]
     client = get_client(llm_cfg["base_url"])
     children = state.get("children", [])
-    bus = get_event_bus()
+    run_id = _run_id(state)
 
     # Fetch repo map once for all children in this batch
     repo_map = _fetch_repo_map(config)
@@ -278,13 +412,26 @@ def execute_node(state: RecursionState) -> dict:
                 temperature=llm_cfg["temperature"],
             )
         except Exception as e:
+            error_text = str(e)
             child["result"] = None
-            results.append({
+            result_entry = {
                 "node_id": child["node_id"],
                 "task": child["task"],
-                "result": str(e),
+                "result": error_text,
                 "success": False,
                 "code_executed": False,
+                "attempts": 0,
+            }
+            results.append(result_entry)
+            _emit(EventType.NODE_COMPLETE, run_id, {
+                "node_id": child["node_id"],
+                "result_summary": error_text[:200],
+                "token_usage": 0,
+                "code_executed": False,
+                "sandbox_exit_code": None,
+                "attempts": 0,
+                "success": False,
+                "failure_reason": "LLM call failed: {}".format(error_text)[:_PREVIEW_LIMIT],
             })
             logger.error("[EXECUTE] Child [%s] LLM call failed: %s",
                          child["node_id"], e)
@@ -301,9 +448,17 @@ def execute_node(state: RecursionState) -> dict:
                         "running in sandbox...", child["node_id"], len(code))
 
             # Execute in sandbox (with retries on failure)
+            trigger = "initial"
             for attempt in range(max_retries + 1):
                 attempts = attempt + 1
-                exec_result = sandbox.execute(child["node_id"], code)
+                execution_id = _execution_id(child["node_id"], attempts)
+                exec_result = sandbox.execute(
+                    child["node_id"], code,
+                    run_id=run_id,
+                    execution_id=execution_id,
+                    attempt=attempts,
+                    trigger=trigger,
+                )
 
                 if exec_result.exit_code == 0:
                     logger.info("[EXECUTE] Child [%s]: code OK (attempt %d, "
@@ -327,6 +482,15 @@ def execute_node(state: RecursionState) -> dict:
                                         child["node_id"])
                             error_msg = exec_result.stderr or "Exit code: {}".format(
                                 exec_result.exit_code)
+                            correction_id = _correction_id(
+                                child["node_id"], attempts + 1, "textgrad")
+                            _emit(EventType.CORRECTION_STARTED, run_id, {
+                                "correction_id": correction_id,
+                                "owner_node_id": child["node_id"],
+                                "failed_execution_id": execution_id,
+                                "attempt": attempts + 1,
+                                "strategy": "textgrad",
+                            })
                             try:
                                 fixed_code, grad_log = gradient_fix(
                                     client=client,
@@ -339,28 +503,56 @@ def execute_node(state: RecursionState) -> dict:
                                     eval_temperature=tg_cfg.get("eval_temperature", 0.1),
                                     update_temperature=tg_cfg.get("update_temperature", 0.2),
                                     max_tokens=llm_cfg["max_tokens"],
+                                    progress_callback=lambda phase, details, cid=correction_id: _emit(
+                                        EventType.CORRECTION_PROGRESS, run_id, {
+                                            "correction_id": cid,
+                                            "phase": "completed" if phase == "iteration_complete" else phase,
+                                            **details,
+                                        }),
                                 )
                                 code = fixed_code
+                                trigger = "textgrad"
                                 logger.info("[EXECUTE] Child [%s]: TextGrad applied "
                                             "(%d iterations, %d chars)",
                                             child["node_id"], len(grad_log), len(code))
                                 # Emit gradient flow event
                                 for g in grad_log:
-                                    bus.emit(EngineEvent(
-                                        event_type=EventType.GRADIENT_FLOW.value,
-                                        payload={
-                                            "node_id": child["node_id"],
-                                            "iteration": g["iteration"],
-                                            "severity": g["severity"],
-                                            "num_mutations": g["num_mutations"],
-                                        },
-                                    ))
+                                    _emit(EventType.GRADIENT_FLOW, run_id, {
+                                        "node_id": child["node_id"],
+                                        "correction_id": correction_id,
+                                        "iteration": g["iteration"],
+                                        "severity": g["severity"],
+                                        "num_mutations": g["num_mutations"],
+                                    })
+                                _emit(EventType.CORRECTION_COMPLETED, run_id, {
+                                    "correction_id": correction_id,
+                                    "success": True,
+                                    "iterations": len(grad_log),
+                                })
                             except Exception as e:
                                 logger.error("[EXECUTE] Child [%s]: TextGrad failed: %s",
                                              child["node_id"], e)
+                                _emit(EventType.CORRECTION_COMPLETED, run_id, {
+                                    "correction_id": correction_id,
+                                    "success": False,
+                                    "error": str(e)[:_PREVIEW_LIMIT],
+                                })
                                 # Fall back to simple retry
                                 error_msg = exec_result.stderr or "Exit code: {}".format(
                                     exec_result.exit_code)
+                                retry_id = _correction_id(
+                                    child["node_id"], attempts + 1, "llm_retry")
+                                _emit(EventType.CORRECTION_STARTED, run_id, {
+                                    "correction_id": retry_id,
+                                    "owner_node_id": child["node_id"],
+                                    "failed_execution_id": execution_id,
+                                    "attempt": attempts + 1,
+                                    "strategy": "llm_retry",
+                                })
+                                _emit(EventType.CORRECTION_PROGRESS, run_id, {
+                                    "correction_id": retry_id,
+                                    "phase": "requesting_retry",
+                                })
                                 retry_messages = redel.build_retry_messages(
                                     child["task"], code, error_msg)
                                 try:
@@ -374,7 +566,24 @@ def execute_node(state: RecursionState) -> dict:
                                     new_code = redel.extract_python_code(llm_response)
                                     if new_code:
                                         code = new_code
-                                except Exception:
+                                        trigger = "llm_retry"
+                                        _emit(EventType.CORRECTION_COMPLETED, run_id, {
+                                            "correction_id": retry_id,
+                                            "success": True,
+                                        })
+                                    else:
+                                        _emit(EventType.CORRECTION_COMPLETED, run_id, {
+                                            "correction_id": retry_id,
+                                            "success": False,
+                                            "error": "Retry response contained no Python code",
+                                        })
+                                        break
+                                except Exception as retry_exc:
+                                    _emit(EventType.CORRECTION_COMPLETED, run_id, {
+                                        "correction_id": retry_id,
+                                        "success": False,
+                                        "error": str(retry_exc)[:_PREVIEW_LIMIT],
+                                    })
                                     break
                         else:
                             # Simple retry: send error back to LLM
@@ -382,6 +591,19 @@ def execute_node(state: RecursionState) -> dict:
                                 exec_result.exit_code)
                             retry_messages = redel.build_retry_messages(
                                 child["task"], code, error_msg)
+                            correction_id = _correction_id(
+                                child["node_id"], attempts + 1, "llm_retry")
+                            _emit(EventType.CORRECTION_STARTED, run_id, {
+                                "correction_id": correction_id,
+                                "owner_node_id": child["node_id"],
+                                "failed_execution_id": execution_id,
+                                "attempt": attempts + 1,
+                                "strategy": "llm_retry",
+                            })
+                            _emit(EventType.CORRECTION_PROGRESS, run_id, {
+                                "correction_id": correction_id,
+                                "phase": "requesting_retry",
+                            })
                             try:
                                 llm_response = chat_completion(
                                     client=client,
@@ -393,16 +615,31 @@ def execute_node(state: RecursionState) -> dict:
                                 new_code = redel.extract_python_code(llm_response)
                                 if new_code:
                                     code = new_code
+                                    trigger = "llm_retry"
+                                    _emit(EventType.CORRECTION_COMPLETED, run_id, {
+                                        "correction_id": correction_id,
+                                        "success": True,
+                                    })
                                     logger.info("[EXECUTE] Child [%s]: retrying with "
                                                 "fixed code (%d chars)",
                                                 child["node_id"], len(code))
                                 else:
                                     logger.warning("[EXECUTE] Child [%s]: retry response "
                                                    "had no code block", child["node_id"])
+                                    _emit(EventType.CORRECTION_COMPLETED, run_id, {
+                                        "correction_id": correction_id,
+                                        "success": False,
+                                        "error": "Retry response contained no Python code",
+                                    })
                                     break
                             except Exception as e:
                                 logger.error("[EXECUTE] Child [%s]: retry LLM call "
                                              "failed: %s", child["node_id"], e)
+                                _emit(EventType.CORRECTION_COMPLETED, run_id, {
+                                    "correction_id": correction_id,
+                                    "success": False,
+                                    "error": str(e)[:_PREVIEW_LIMIT],
+                                })
                                 break
         else:
             logger.info("[EXECUTE] Child [%s]: no code block found, "
@@ -428,17 +665,20 @@ def execute_node(state: RecursionState) -> dict:
         results.append(result_entry)
 
         # Emit event
-        bus.emit(EngineEvent(
-            event_type=EventType.NODE_COMPLETE.value,
-            payload={
-                "node_id": child["node_id"],
-                "result_summary": llm_response[:200],
-                "token_usage": len(llm_response.split()),
-                "code_executed": code is not None,
-                "sandbox_exit_code": exec_result.exit_code if exec_result else None,
-                "attempts": attempts,
-            },
-        ))
+        completion_payload = {
+            "node_id": child["node_id"],
+            "result_summary": llm_response[:200],
+            "token_usage": len(llm_response.split()),
+            "code_executed": code is not None,
+            "sandbox_exit_code": exec_result.exit_code if exec_result else None,
+            "attempts": attempts,
+            "success": success,
+        }
+        if not success:
+            completion_payload["failure_reason"] = (
+                exec_result.stderr[:_PREVIEW_LIMIT] if exec_result
+                else "Execution failed")
+        _emit(EventType.NODE_COMPLETE, run_id, completion_payload)
 
     return {"status": "validating", "results": results}
 
@@ -465,6 +705,13 @@ def validate_node(state: RecursionState) -> dict:
                        "%d had code execution, %d required retries.",
                        len(failed), len(results),
                        len(code_runs), len(retried))
+
+    summaries = [str(r.get("result", "")) for r in results]
+    _emit(EventType.RUN_COMPLETED, _run_id(state), {
+        "success": all_success,
+        "mode": "delegated",
+        "result_summary": "\n".join(summaries)[:200],
+    })
 
     return {"status": "done"}
 

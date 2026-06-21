@@ -19,13 +19,17 @@ import '@xyflow/react/dist/style.css'
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion'
 import dagre from 'dagre'
 import type { AgentNode } from '../types/events'
+import type { CorrectionRun, RunState, SandboxRun } from '../types/events'
 import {
   NODE_REVEAL_LEAD_MS,
-  buildExecutionEdges,
-  buildLayoutEdges,
-  isAnimationPending,
+  AnimationRegistry,
   type ExecutionEdgeData,
 } from './agentTopology'
+import { buildWorkflowTopology } from './executionTopology'
+import {
+  CorrectionNodeComponent,
+  SandboxNodeComponent,
+} from './ExecutionNodes'
 
 // ---------------------------------------------------------------------------
 // Custom Edge: Info Line (thin orange rectangle)
@@ -36,12 +40,20 @@ interface AnimatedEdgeData extends ExecutionEdgeData {
   onDrawComplete: (edgeId: string) => void
 }
 
+const edgePalettes = {
+  orange: { main: '#f97316', highlight: 'rgba(255, 213, 170, 0.72)', pulse: 'rgba(255, 190, 115, 0.32)' },
+  purple: { main: '#a855f7', highlight: 'rgba(233, 213, 255, 0.72)', pulse: 'rgba(216, 180, 254, 0.32)' },
+  amber: { main: '#eab308', highlight: 'rgba(254, 240, 138, 0.72)', pulse: 'rgba(253, 224, 71, 0.3)' },
+  red: { main: '#ef4444', highlight: 'rgba(254, 202, 202, 0.68)', pulse: 'rgba(252, 165, 165, 0.3)' },
+}
+
 function InfoLineEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProps) {
   // Orthogonal path: down from source, horizontal, then down to target
   const midY = (sourceY + targetY) / 2
   const path = `M ${sourceX},${sourceY} L ${sourceX},${midY} L ${targetX},${midY} L ${targetX},${targetY}`
   const prefersReducedMotion = useReducedMotion()
   const edgeData = data as AnimatedEdgeData | undefined
+  const palette = edgePalettes[edgeData?.tone ?? 'orange']
   const delayMs = edgeData?.delayMs ?? 0
   const durationMs = edgeData?.durationMs ?? 900
   const shouldDraw = Boolean(edgeData?.shouldAnimate && !prefersReducedMotion)
@@ -54,7 +66,7 @@ function InfoLineEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProp
         path={path}
         className="info-line__background"
         style={{
-          stroke: '#f97316',
+          stroke: palette.main,
           strokeWidth: 6,
           strokeOpacity: 0.14,
           strokeLinecap: 'round',
@@ -81,7 +93,7 @@ function InfoLineEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProp
           if (shouldDraw) edgeData?.onDrawComplete(id)
         }}
         style={{
-          stroke: '#f97316',
+          stroke: palette.main,
           strokeWidth: 4,
           strokeLinecap: 'round',
           strokeLinejoin: 'round',
@@ -95,11 +107,14 @@ function InfoLineEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProp
           initial={{ opacity: 0 }}
           animate={{ opacity: 0.48 }}
           transition={{ duration: 0.35, delay: overlayDelayMs / 1000 }}
-          style={{ animationDelay: `${overlayDelayMs}ms` }}
+          style={{
+            animationDelay: `${overlayDelayMs}ms`,
+            stroke: palette.highlight,
+          }}
         />
       )}
       {!prefersReducedMotion && (
-        <circle r="2.4" className="info-line__pulse">
+        <circle r="2.4" className="info-line__pulse" style={{ fill: palette.pulse }}>
           <animateMotion
             path={path}
             begin={`${(delayMs + durationMs + 900) / 1000}s`}
@@ -126,7 +141,7 @@ const hiddenHandleStyle = {
 // ---------------------------------------------------------------------------
 
 interface RootNodeData {
-  status: 'offline' | 'running' | 'success'
+  status: 'offline' | 'running' | 'success' | 'error'
   task: string
   onClick: () => void
 }
@@ -134,6 +149,7 @@ interface RootNodeData {
 function RootNodeComponent({ data }: { data: RootNodeData }) {
   const isOffline = data.status === 'offline'
   const isRunning = data.status === 'running'
+  const isError = data.status === 'error'
 
   return (
     <motion.div
@@ -146,7 +162,9 @@ function RootNodeComponent({ data }: { data: RootNodeData }) {
           ? 'border-gray-600 bg-gray-800/80'
           : isRunning
             ? 'border-accent-green bg-accent-green/10 shadow-[0_0_20px_rgba(34,197,94,0.3)]'
-            : 'border-accent-green/50 bg-accent-green/5'
+            : isError
+              ? 'border-accent-red/60 bg-accent-red/5'
+              : 'border-accent-green/50 bg-accent-green/5'
         }
       `}
     >
@@ -165,7 +183,7 @@ function RootNodeComponent({ data }: { data: RootNodeData }) {
           />
         ) : (
           <div className={`w-3 h-3 rounded-full ${
-            isOffline ? 'bg-gray-500' : 'bg-accent-green'
+            isOffline ? 'bg-gray-500' : isError ? 'bg-accent-red' : 'bg-accent-green'
           }`} />
         )}
         <span className="text-sm font-semibold text-text-primary">
@@ -176,7 +194,7 @@ function RootNodeComponent({ data }: { data: RootNodeData }) {
         {data.task || 'Waiting for task...'}
       </p>
       <p className={`text-xs mt-1 capitalize ${
-        isOffline ? 'text-gray-500' : isRunning ? 'text-accent-green' : 'text-accent-green/60'
+        isOffline ? 'text-gray-500' : isError ? 'text-accent-red' : isRunning ? 'text-accent-green' : 'text-accent-green/60'
       }`}>
         {data.status}
       </p>
@@ -270,15 +288,15 @@ function SubAgentNodeComponent({ data }: { data: SubAgentNodeData }) {
   return (
     <motion.div
       initial={shouldReveal
-        ? { opacity: 0, scale: 0.92 }
+        ? { opacity: 0, scale: 0.94 }
         : { opacity: 1, scale: 1 }}
       animate={{ opacity: 1, scale: 1 }}
       exit={{ opacity: 0, scale: 0.8 }}
       transition={shouldReveal
         ? {
-            opacity: { duration: 0.28, delay: data.revealDelayMs / 1000 },
+            opacity: { duration: 0.55, delay: data.revealDelayMs / 1000 },
             scale: {
-              duration: 0.28,
+              duration: 0.55,
               delay: data.revealDelayMs / 1000,
               ease: [0.22, 1, 0.36, 1],
             },
@@ -332,8 +350,11 @@ function SubAgentNodeComponent({ data }: { data: SubAgentNodeData }) {
 // Layout engine (dagre)
 // ---------------------------------------------------------------------------
 
-const NODE_WIDTH = 220
-const NODE_HEIGHT = 80
+function nodeDimensions(node: Node): { width: number; height: number } {
+  if (node.type === 'sandbox') return { width: 180, height: 70 }
+  if (node.type === 'correction') return { width: 172, height: 64 }
+  return { width: 220, height: 80 }
+}
 
 function getLayoutedElements(
   nodes: Node[],
@@ -345,7 +366,7 @@ function getLayoutedElements(
   g.setGraph({ rankdir: 'TB', nodesep: 60, ranksep: 100 })
 
   nodes.forEach(node => {
-    g.setNode(node.id, { width: NODE_WIDTH, height: NODE_HEIGHT })
+    g.setNode(node.id, nodeDimensions(node))
   })
   layoutEdges.forEach(edge => {
     g.setEdge(edge.source, edge.target)
@@ -355,9 +376,13 @@ function getLayoutedElements(
 
   const layoutedNodes = nodes.map(node => {
     const pos = g.node(node.id)
+    const dimensions = nodeDimensions(node)
     return {
       ...node,
-      position: { x: pos.x - NODE_WIDTH / 2, y: pos.y - NODE_HEIGHT / 2 },
+      position: {
+        x: pos.x - dimensions.width / 2,
+        y: pos.y - dimensions.height / 2,
+      },
       sourcePosition: Position.Bottom,
       targetPosition: Position.Top,
     }
@@ -372,8 +397,13 @@ function getLayoutedElements(
 
 interface AgentTreeProps {
   nodes: Map<string, AgentNode>
+  sandboxRuns: Map<string, SandboxRun>
+  corrections: Map<string, CorrectionRun>
+  run: RunState | null
   onNodeClick: (nodeId: string) => void
-  rootStatus: 'offline' | 'running' | 'success'
+  onSandboxClick: (sandboxId: string) => void
+  onCorrectionClick: (correctionId: string) => void
+  rootStatus: 'offline' | 'running' | 'success' | 'error'
   rootTask: string
   outputStatus: 'waiting' | 'success' | 'error'
   outputSummary: string
@@ -385,6 +415,8 @@ const nodeTypes: NodeTypes = {
   root: RootNodeComponent,
   output: OutputNodeComponent,
   agent: SubAgentNodeComponent,
+  sandbox: SandboxNodeComponent,
+  correction: CorrectionNodeComponent,
 }
 
 const edgeTypes: EdgeTypes = {
@@ -392,38 +424,18 @@ const edgeTypes: EdgeTypes = {
 }
 
 export default function AgentTree({
-  nodes, onNodeClick, rootStatus, rootTask,
+  nodes, sandboxRuns, corrections, run,
+  onNodeClick, onSandboxClick, onCorrectionClick, rootStatus, rootTask,
   outputStatus, outputSummary, onRootClick, onOutputClick,
 }: AgentTreeProps) {
   const flowInstanceRef = useRef<ReactFlowInstance | null>(null)
-  const drawnEdgeIdsRef = useRef(new Set<string>())
-  const revealedNodeIdsRef = useRef(new Set<string>())
-  const [drawnEdgeIds, setDrawnEdgeIds] = useState<ReadonlySet<string>>(
-    () => new Set(),
-  )
-  const [revealedNodeIds, setRevealedNodeIds] = useState<ReadonlySet<string>>(
-    () => new Set(),
-  )
+  const [animationRegistry] = useState(() => new AnimationRegistry())
   const markEdgeDrawn = useCallback((edgeId: string) => {
-    setDrawnEdgeIds(previous => {
-      if (previous.has(edgeId)) return previous
-      return new Set(previous).add(edgeId)
-    })
-  }, [])
+    animationRegistry.markEdgeDrawn(edgeId)
+  }, [animationRegistry])
   const markNodeRevealed = useCallback((nodeId: string) => {
-    setRevealedNodeIds(previous => {
-      if (previous.has(nodeId)) return previous
-      return new Set(previous).add(nodeId)
-    })
-  }, [])
-
-  useEffect(() => {
-    drawnEdgeIdsRef.current = new Set(drawnEdgeIds)
-  }, [drawnEdgeIds])
-
-  useEffect(() => {
-    revealedNodeIdsRef.current = new Set(revealedNodeIds)
-  }, [revealedNodeIds])
+    animationRegistry.markNodeRevealed(nodeId)
+  }, [animationRegistry])
 
   const { flowNodes, flowEdges } = useMemo(() => {
     const rawNodes: Node[] = []
@@ -446,8 +458,11 @@ export default function AgentTree({
     })
 
     const agentNodes = Array.from(nodes.values())
-    const executionEdges = buildExecutionEdges(agentNodes)
-    const layoutEdges = buildLayoutEdges(agentNodes)
+    const sandboxNodes = Array.from(sandboxRuns.values())
+    const correctionNodes = Array.from(corrections.values())
+    const workflow = buildWorkflowTopology(agentNodes, sandboxNodes, correctionNodes, run)
+    const executionEdges = workflow.renderEdges
+    const layoutEdges = workflow.layoutEdges
     const incomingSpawnEdges = new Map(
       executionEdges
         .filter(edge => edge.data.phase === 'spawn')
@@ -472,10 +487,45 @@ export default function AgentTree({
           node_id: agent.id,
           onClick: () => onNodeClick(agent.id),
           revealDelayMs,
-          shouldAnimateReveal: isAnimationPending(
-            revealedNodeIds,
-            agent.id,
-          ),
+          shouldAnimateReveal: animationRegistry.shouldRevealNode(agent.id),
+          onRevealComplete: markNodeRevealed,
+        },
+        position: { x: 0, y: 0 },
+      })
+    })
+
+    sandboxNodes.forEach(sandbox => {
+      const incomingEdge = executionEdges.find(edge => edge.target === sandbox.id)
+      const revealDelayMs = incomingEdge
+        ? incomingEdge.data.delayMs + incomingEdge.data.durationMs - NODE_REVEAL_LEAD_MS
+        : 0
+      rawNodes.push({
+        id: sandbox.id,
+        type: 'sandbox',
+        data: {
+          sandbox,
+          onClick: () => onSandboxClick(sandbox.id),
+          revealDelayMs,
+          shouldAnimateReveal: animationRegistry.shouldRevealNode(sandbox.id),
+          onRevealComplete: markNodeRevealed,
+        },
+        position: { x: 0, y: 0 },
+      })
+    })
+
+    correctionNodes.forEach(correction => {
+      const incomingEdge = executionEdges.find(edge => edge.target === correction.id)
+      const revealDelayMs = incomingEdge
+        ? incomingEdge.data.delayMs + incomingEdge.data.durationMs - NODE_REVEAL_LEAD_MS
+        : 0
+      rawNodes.push({
+        id: correction.id,
+        type: 'correction',
+        data: {
+          correction,
+          onClick: () => onCorrectionClick(correction.id),
+          revealDelayMs,
+          shouldAnimateReveal: animationRegistry.shouldRevealNode(correction.id),
           onRevealComplete: markNodeRevealed,
         },
         position: { x: 0, y: 0 },
@@ -486,7 +536,7 @@ export default function AgentTree({
       ...edge,
       data: {
         ...edge.data,
-        shouldAnimate: isAnimationPending(drawnEdgeIds, edge.id),
+        shouldAnimate: animationRegistry.shouldAnimateEdge(edge.id),
         onDrawComplete: markEdgeDrawn,
       },
     })))
@@ -496,9 +546,10 @@ export default function AgentTree({
 
     return { flowNodes: layoutedNodes, flowEdges: layoutedEdges }
   }, [
-    nodes, rootStatus, rootTask, outputStatus, outputSummary,
-    onNodeClick, onRootClick, onOutputClick, markEdgeDrawn, markNodeRevealed,
-    drawnEdgeIds, revealedNodeIds,
+    nodes, sandboxRuns, corrections, run, rootStatus, rootTask, outputStatus, outputSummary,
+    onNodeClick, onSandboxClick, onCorrectionClick,
+    onRootClick, onOutputClick, markEdgeDrawn, markNodeRevealed,
+    animationRegistry,
   ])
 
   const onNodesChange: OnNodesChange = useCallback(() => {}, [])
