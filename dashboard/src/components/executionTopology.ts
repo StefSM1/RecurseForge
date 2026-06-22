@@ -9,31 +9,59 @@ import {
   buildExecutionEdges,
   type ExecutionEdge,
   type ExecutionEdgePhase,
+  type ExecutionEdgeRoute,
   type ExecutionEdgeTone,
 } from './agentTopology'
+import {
+  buildOwnerExecutionViews,
+  type OwnerExecutionView,
+  type SandboxNodeView,
+} from './executionState'
 
 export interface WorkflowTopology {
   renderEdges: ExecutionEdge[]
   layoutEdges: ExecutionEdge[]
+  sandboxNodes: SandboxNodeView[]
+  ownerViews: OwnerExecutionView[]
+}
+
+interface WorkflowEdgeOptions {
+  tone?: ExecutionEdgeTone
+  route: ExecutionEdgeRoute
+  sourceHandle: string
+  targetHandle: string
+  feedbackOffset?: number
+  feedbackState?: ExecutionEdge['data']['feedbackState']
 }
 
 function workflowEdge(
+  id: string,
   source: string,
   target: string,
   phase: ExecutionEdgePhase,
-  tone: ExecutionEdgeTone = 'orange',
+  options: WorkflowEdgeOptions,
 ): ExecutionEdge {
   return {
-    id: `flow-${source}-${target}`,
+    id,
     source,
     target,
+    sourceHandle: options.sourceHandle,
+    targetHandle: options.targetHandle,
     type: 'infoLine',
-    data: { phase, tone, delayMs: 0, durationMs: EDGE_DRAW_DURATION_MS },
+    data: {
+      phase,
+      route: options.route,
+      tone: options.tone ?? 'orange',
+      delayMs: 0,
+      durationMs: EDGE_DRAW_DURATION_MS,
+      feedbackOffset: options.feedbackOffset,
+      feedbackState: options.feedbackState,
+    },
   }
 }
 
-function sortedSandboxes(sandboxRuns: SandboxRun[]): SandboxRun[] {
-  return [...sandboxRuns].sort((a, b) => a.attempt - b.attempt || a.startTime - b.startTime)
+function isTerminal(status: AgentNode['status']): boolean {
+  return status === 'success' || status === 'failed'
 }
 
 export function buildWorkflowTopology(
@@ -42,106 +70,100 @@ export function buildWorkflowTopology(
   corrections: CorrectionRun[],
   run: RunState | null,
 ): WorkflowTopology {
-  const renderEdges = buildExecutionEdges(agents)
+  const ownerViews = buildOwnerExecutionViews(agents, sandboxRuns, corrections, run)
+  const sandboxNodes = ownerViews.map(view => view.sandbox)
+  const ownerViewById = new Map(ownerViews.map(view => [view.ownerId, view]))
+  const spawnEdges = buildExecutionEdges(agents)
     .filter(edge => edge.data.phase === 'spawn')
-  const correctionByOwnerAttempt = new Map(
-    corrections.map(correction => [
-      `${correction.ownerId}:${correction.attempt}`,
-      correction,
-    ]),
-  )
+  const renderEdges = [...spawnEdges]
   const agentsWithChildren = new Set(
-    renderEdges
-      .filter(edge => edge.data.phase === 'spawn' && edge.source !== 'root')
+    spawnEdges
+      .filter(edge => edge.source !== 'root')
       .map(edge => edge.source),
   )
-  const agentById = new Map(agents.map(agent => [agent.id, agent]))
-  const sandboxesByOwner = new Map<string, SandboxRun[]>()
-
-  for (const sandbox of sandboxRuns) {
-    const ownerRuns = sandboxesByOwner.get(sandbox.ownerId) ?? []
-    ownerRuns.push(sandbox)
-    sandboxesByOwner.set(sandbox.ownerId, ownerRuns)
-  }
-
-  for (const correction of corrections) {
+  for (const view of ownerViews) {
+    const directRoot = view.ownerId === 'root' && agents.length === 0
     renderEdges.push(workflowEdge(
-      correction.failedExecutionId,
-      correction.id,
-      'diagnostic',
-      correction.strategy === 'textgrad' ? 'purple' : 'amber',
+      `sandbox-input-${view.ownerId}`,
+      view.ownerId,
+      view.sandbox.id,
+      'sandbox',
+      {
+        route: directRoot ? 'horizontal' : 'vertical',
+        sourceHandle: directRoot ? 'direct-out' : 'forward-out',
+        targetHandle: directRoot ? 'direct-in' : 'forward-in',
+      },
     ))
-  }
-
-  for (const [ownerId, ownerRuns] of sandboxesByOwner) {
-    for (const sandbox of sortedSandboxes(ownerRuns)) {
-      const correction = sandbox.attempt > 1
-        ? correctionByOwnerAttempt.get(`${ownerId}:${sandbox.attempt - 1}`)
-        : undefined
-      const previousSandbox = ownerRuns.find(item => item.attempt === sandbox.attempt - 1)
-      const source = correction?.id ?? previousSandbox?.id ?? ownerId
-      const tone: ExecutionEdgeTone = correction
-        ? correction.strategy === 'textgrad' ? 'purple' : 'amber'
-        : 'orange'
+    if (view.feedback !== 'none') {
       renderEdges.push(workflowEdge(
-        source,
-        sandbox.id,
-        correction ? 'correction' : 'sandbox',
-        tone,
+        `feedback-${view.ownerId}-attempt-${view.feedbackAttempt}`,
+        view.sandbox.id,
+        view.ownerId,
+        'feedback',
+        {
+          tone: 'purple',
+          route: directRoot ? 'feedback-horizontal' : 'feedback',
+          sourceHandle: directRoot ? 'feedback-top' : 'feedback-out',
+          targetHandle: directRoot ? 'feedback-top' : 'feedback-in',
+          feedbackOffset: 34,
+          feedbackState: view.feedback,
+        },
       ))
     }
   }
 
   const layoutEdges = [...renderEdges]
-  const outputCandidates: Array<{ ownerId: string; source: string; ready: boolean; failed: boolean }> = []
+  const outputCandidates: Array<{
+    ownerId: string
+    source: string
+    ready: boolean
+    failed: boolean
+    directRoot: boolean
+  }> = []
 
   for (const agent of agents) {
     if (agentsWithChildren.has(agent.id)) continue
-    const ownerRuns = sortedSandboxes(sandboxesByOwner.get(agent.id) ?? [])
-    const finalSandbox = ownerRuns[ownerRuns.length - 1]
+    const ownerView = ownerViewById.get(agent.id)
+    const finalSandbox = ownerView?.sandbox
     outputCandidates.push({
       ownerId: agent.id,
       source: finalSandbox?.id ?? agent.id,
-      ready: agent.status === 'success' || agent.status === 'failed',
-      failed: finalSandbox
-        ? finalSandbox.status === 'failed'
-        : agent.status === 'failed',
+      ready: isTerminal(agent.status),
+      failed: finalSandbox?.status === 'failed' || agent.status === 'failed',
+      directRoot: false,
     })
   }
 
-  const rootRuns = sortedSandboxes(sandboxesByOwner.get('root') ?? [])
-  const finalRootSandbox = rootRuns[rootRuns.length - 1]
   if (agents.length === 0) {
+    const finalRootSandbox = ownerViewById.get('root')?.sandbox
     outputCandidates.push({
       ownerId: 'root',
       source: finalRootSandbox?.id ?? 'root',
       ready: run ? run.status !== 'running' : true,
-      failed: finalRootSandbox
-        ? finalRootSandbox.status === 'failed'
-        : run?.status === 'failed',
+      failed: finalRootSandbox?.status === 'failed' || run?.status === 'failed',
+      directRoot: true,
     })
   }
 
   for (const candidate of outputCandidates) {
+    const sourceIsSandbox = sandboxNodes.some(sandbox => sandbox.id === candidate.source)
     const edge = workflowEdge(
+      `terminal-${candidate.ownerId}-${candidate.source}-output`,
       candidate.source,
       'output',
-      candidate.failed ? 'failure' : 'result',
-      candidate.failed ? 'red' : 'orange',
+      candidate.failed ? 'failure' : candidate.source === 'root' ? 'direct' : 'result',
+      {
+        tone: candidate.failed ? 'red' : 'orange',
+        route: candidate.directRoot ? 'horizontal' : 'gutter',
+        sourceHandle: candidate.directRoot
+          ? sourceIsSandbox ? 'direct-out' : 'direct-out'
+          : sourceIsSandbox ? 'result-out' : 'forward-out',
+        targetHandle: 'result-in',
+      },
     )
     layoutEdges.push(edge)
     if (candidate.ready) renderEdges.push(edge)
   }
 
-  // Ignore sandbox owners that do not correspond to a visible root or agent.
-  return {
-    renderEdges: renderEdges.filter(edge => (
-      edge.source === 'root'
-      || edge.target === 'output'
-      || agentById.has(edge.source)
-      || sandboxRuns.some(runItem => runItem.id === edge.source || runItem.id === edge.target)
-      || corrections.some(item => item.id === edge.source || item.id === edge.target)
-    )),
-    layoutEdges,
-  }
+  return { renderEdges, layoutEdges, sandboxNodes, ownerViews }
 }

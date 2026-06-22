@@ -58,9 +58,9 @@ export function reduceEngineEvent(
   const identity = eventIdentity(event)
   if (state.seenEventIds.has(identity)) return state
 
-  const nodes = new Map(state.nodes)
-  const sandboxRuns = new Map(state.sandboxRuns)
-  const corrections = new Map(state.corrections)
+  let nodes = new Map(state.nodes)
+  let sandboxRuns = new Map(state.sandboxRuns)
+  let corrections = new Map(state.corrections)
   const seenEventIds = new Set(state.seenEventIds).add(identity)
   const timestamp = eventTime(event)
   let run = state.run
@@ -68,8 +68,14 @@ export function reduceEngineEvent(
   switch (event.event_type) {
     case 'run_started': {
       const payload = event.payload as RunStartedPayload
+      const nextRunId = event.run_id ?? 'current'
+      if (run?.id !== nextRunId) {
+        nodes = new Map()
+        sandboxRuns = new Map()
+        corrections = new Map()
+      }
       run = {
-        id: event.run_id ?? 'current',
+        id: nextRunId,
         task: payload.task,
         mode: payload.mode ?? 'unknown',
         status: 'running',
@@ -94,6 +100,7 @@ export function reduceEngineEvent(
       const payload = event.payload as NodeSpawnPayload
       nodes.set(payload.node_id, {
         id: payload.node_id,
+        runId: event.run_id,
         parentId: payload.parent_id,
         task: payload.task,
         status: 'running',

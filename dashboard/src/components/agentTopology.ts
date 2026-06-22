@@ -1,9 +1,12 @@
 import type { AgentNode } from '../types/events'
+import type { FeedbackState } from './executionState'
 
 export interface ExecutionEdge {
   id: string
   source: string
   target: string
+  sourceHandle?: string
+  targetHandle?: string
   type: 'infoLine'
   data: ExecutionEdgeData
 }
@@ -13,17 +16,26 @@ export type ExecutionEdgePhase =
   | 'spawn'
   | 'result'
   | 'sandbox'
-  | 'diagnostic'
-  | 'correction'
+  | 'feedback'
   | 'failure'
 
 export type ExecutionEdgeTone = 'orange' | 'purple' | 'amber' | 'red'
+export type ExecutionEdgeRoute =
+  | 'branch'
+  | 'vertical'
+  | 'horizontal'
+  | 'feedback'
+  | 'feedback-horizontal'
+  | 'gutter'
 
 export interface ExecutionEdgeData extends Record<string, unknown> {
   phase: ExecutionEdgePhase
   delayMs: number
   durationMs: number
   tone?: ExecutionEdgeTone
+  route: ExecutionEdgeRoute
+  feedbackOffset?: number
+  feedbackState?: FeedbackState
 }
 
 const ROOT_ID = 'root'
@@ -64,7 +76,14 @@ function edge(
     source,
     target,
     type: 'infoLine',
-    data: { phase, delayMs, durationMs: EDGE_DRAW_DURATION_MS },
+    sourceHandle: source === ROOT_ID ? 'spawn-out' : 'forward-out',
+    targetHandle: 'spawn-in',
+    data: {
+      phase,
+      route: phase === 'spawn' ? 'branch' : 'gutter',
+      delayMs,
+      durationMs: EDGE_DRAW_DURATION_MS,
+    },
   }
 }
 

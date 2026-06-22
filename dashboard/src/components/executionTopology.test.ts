@@ -33,7 +33,7 @@ function links(
 describe('execution workflow topology', () => {
   it('shows a running sandbox without prematurely connecting output', () => {
     expect(links([agent()], [sandbox('sandbox-a-1', 1, 'running')], []))
-      .toEqual(['root->agent-a', 'agent-a->sandbox-a-1'])
+      .toEqual(['root->agent-a', 'agent-a->sandbox-agent-a'])
   })
 
   it('preserves failure, correction, retry, and successful output order', () => {
@@ -43,10 +43,8 @@ describe('execution workflow topology', () => {
       [correction],
     )).toEqual([
       'root->agent-a',
-      'sandbox-a-1->correction-agent-a-1',
-      'agent-a->sandbox-a-1',
-      'correction-agent-a-1->sandbox-a-2',
-      'sandbox-a-2->output',
+      'agent-a->sandbox-agent-a',
+      'sandbox-agent-a->output',
     ])
   })
 
@@ -61,7 +59,7 @@ describe('execution workflow topology', () => {
       id: 'run-1', task: 'Direct', mode: 'direct', status: 'success', startTime: 1,
     }
     expect(links([], [sandbox('sandbox-root-1', 1, 'success', 'root')], [], run))
-      .toEqual(['root->sandbox-root-1', 'sandbox-root-1->output'])
+      .toEqual(['root->sandbox-root', 'sandbox-root->output'])
   })
 
   it('keeps output constrained below a running lane without rendering its edge', () => {
@@ -69,16 +67,31 @@ describe('execution workflow topology', () => {
       [agent()], [sandbox('sandbox-a-1', 1, 'running')], [], null,
     )
     expect(topology.renderEdges.some(edge => edge.target === 'output')).toBe(false)
-    expect(topology.layoutEdges.some(edge => edge.source === 'sandbox-a-1' && edge.target === 'output'))
+    expect(topology.layoutEdges.some(edge => edge.source === 'sandbox-agent-a' && edge.target === 'output'))
       .toBe(true)
   })
 
-  it('uses amber retry flow and red terminal failure routing', () => {
+  it('uses purple owner feedback and red terminal failure routing', () => {
     const retryCorrection: CorrectionRun = {
       ...correction,
       id: 'retry-agent-a-1',
       strategy: 'llm_retry',
     }
+    const feedbackTopology = buildWorkflowTopology(
+      [agent('running')],
+      [sandbox('sandbox-a-1', 1, 'failed')],
+      [retryCorrection],
+      null,
+    )
+    const feedback = feedbackTopology.renderEdges.find(edge => edge.data.phase === 'feedback')
+    expect(feedback).toMatchObject({
+      source: 'sandbox-agent-a', target: 'agent-a',
+      sourceHandle: 'feedback-out', targetHandle: 'feedback-in',
+    })
+    expect(feedback?.data).toMatchObject({
+      tone: 'purple', feedbackState: 'withdrawing',
+    })
+
     const topology = buildWorkflowTopology(
       [agent('failed')],
       [
@@ -89,11 +102,28 @@ describe('execution workflow topology', () => {
       null,
     )
 
-    expect(topology.renderEdges.find(edge => edge.source === 'sandbox-a-1')?.data.tone)
-      .toBe('amber')
-    expect(topology.renderEdges.find(edge => edge.source === 'retry-agent-a-1')?.data.tone)
-      .toBe('amber')
     expect(topology.renderEdges.find(edge => edge.target === 'output')?.data.tone)
       .toBe('red')
+  })
+
+  it('matches corrections by failed execution id rather than attempt arithmetic', () => {
+    const backendNumberedCorrection = { ...correction, attempt: 2 }
+    const topology = buildWorkflowTopology(
+      [agent()],
+      [sandbox('sandbox-a-1', 1, 'failed')],
+      [backendNumberedCorrection],
+      null,
+    )
+    expect(topology.renderEdges.find(edge => edge.data.phase === 'feedback'))
+      .toMatchObject({ source: 'sandbox-agent-a', target: 'agent-a' })
+  })
+
+  it('does not render correction records as nodes or edge endpoints', () => {
+    const topology = buildWorkflowTopology(
+      [agent()], [sandbox('sandbox-a-1', 1, 'failed')], [correction], null,
+    )
+    expect(topology.renderEdges.some(edge => (
+      edge.source === correction.id || edge.target === correction.id
+    ))).toBe(false)
   })
 })

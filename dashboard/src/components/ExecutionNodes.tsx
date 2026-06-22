@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { Handle, Position } from '@xyflow/react'
 import { motion, useReducedMotion } from 'framer-motion'
-import type { CorrectionRun, SandboxRun } from '../types/events'
+import type { SandboxNodeView } from './executionState'
 
 const hiddenHandleStyle = {
   width: 1,
@@ -19,12 +19,7 @@ interface RevealData {
 }
 
 export interface SandboxNodeData extends RevealData {
-  sandbox: SandboxRun
-  onClick: () => void
-}
-
-export interface CorrectionNodeData extends RevealData {
-  correction: CorrectionRun
+  sandbox: SandboxNodeView
   onClick: () => void
 }
 
@@ -57,7 +52,9 @@ export function SandboxNodeComponent({ data }: { data: SandboxNodeData }) {
     ? 'execution-node--success'
     : sandbox.status === 'failed'
       ? 'execution-node--failed'
-      : 'execution-node--running'
+      : sandbox.status === 'offline'
+        ? 'execution-node--offline'
+        : 'execution-node--running'
 
   return (
     <motion.div
@@ -82,76 +79,25 @@ export function SandboxNodeComponent({ data }: { data: SandboxNodeData }) {
       style={{ pointerEvents: revealed || reducedMotion ? 'auto' : 'none' }}
       className={`execution-node execution-node--sandbox ${statusClass}`}
     >
-      <Handle type="target" position={Position.Top} style={hiddenHandleStyle} />
-      <Handle type="source" position={Position.Bottom} style={hiddenHandleStyle} />
+      <Handle id="forward-in" type="target" position={Position.Top} style={hiddenHandleStyle} />
+      <Handle id="direct-in" type="target" position={Position.Left} style={hiddenHandleStyle} />
+      <Handle id="feedback-out" type="source" position={Position.Left} style={hiddenHandleStyle} />
+      <Handle id="feedback-top" type="source" position={Position.Top} style={hiddenHandleStyle} />
+      <Handle id="result-out" type="source" position={Position.Bottom} style={hiddenHandleStyle} />
+      <Handle id="direct-out" type="source" position={Position.Right} style={hiddenHandleStyle} />
       <div className="execution-node__header">
         <span className="execution-node__icon">&gt;_</span>
-        <span>Sandbox #{sandbox.attempt}</span>
+        <span>Sandbox</span>
         {sandbox.status === 'running' && <WaitingDots />}
         {sandbox.status === 'success' && <span className="execution-node__result">OK</span>}
         {sandbox.status === 'failed' && <span className="execution-node__result">FAIL</span>}
+        {sandbox.status === 'offline' && <span className="execution-node__result">OFFLINE</span>}
       </div>
       <div className="execution-node__meta">
-        <span className="capitalize">{sandbox.trigger.replace('_', ' ')}</span>
+        <span>attempt {sandbox.attempt}</span>
+        <span className="capitalize">{sandbox.status === 'offline' ? 'waiting for retry' : sandbox.trigger.replace('_', ' ')}</span>
         {sandbox.exitCode !== undefined && <span>exit {sandbox.exitCode}</span>}
         {sandbox.durationMs !== undefined && <span>{sandbox.durationMs}ms</span>}
-      </div>
-    </motion.div>
-  )
-}
-
-function correctionLabel(correction: CorrectionRun): string {
-  if (correction.status === 'failed') return 'Correction failed'
-  if (correction.status === 'success') return 'Correction ready'
-  switch (correction.phase) {
-    case 'evaluating_loss': return 'Evaluating loss'
-    case 'gradient_ready': return 'Gradient ready'
-    case 'applying_update': return 'Applying update'
-    case 'requesting_retry': return 'Requesting retry'
-    default: return 'Correcting code'
-  }
-}
-
-export function CorrectionNodeComponent({ data }: { data: CorrectionNodeData }) {
-  const { correction } = data
-  const reducedMotion = useReducedMotion()
-  const shouldReveal = data.shouldAnimateReveal && !reducedMotion
-  const [revealed, setRevealed] = useState(!shouldReveal)
-  const strategyClass = correction.strategy === 'textgrad'
-    ? 'execution-node--textgrad'
-    : 'execution-node--retry'
-
-  return (
-    <motion.div
-      initial={shouldReveal ? { opacity: 0, scale: 0.95 } : { opacity: 1, scale: 1 }}
-      animate={{ opacity: 1, scale: 1 }}
-      transition={{ duration: shouldReveal ? 0.42 : 0, delay: data.revealDelayMs / 1000 }}
-      onAnimationComplete={() => {
-        if (!revealed) {
-          setRevealed(true)
-          data.onRevealComplete(correction.id)
-        }
-      }}
-      onClick={data.onClick}
-      style={{ pointerEvents: revealed || reducedMotion ? 'auto' : 'none' }}
-      className={`execution-node execution-node--correction ${strategyClass}`}
-    >
-      <Handle type="target" position={Position.Top} style={hiddenHandleStyle} />
-      <Handle type="source" position={Position.Bottom} style={hiddenHandleStyle} />
-      {correction.status === 'running' && !reducedMotion && (
-        <span className="execution-node__scan" />
-      )}
-      <div className="execution-node__header">
-        <span className="execution-node__icon">
-          {correction.strategy === 'textgrad' ? '∇' : '↻'}
-        </span>
-        <span>{correction.strategy === 'textgrad' ? 'TextGrad' : 'LLM Retry'}</span>
-        {correction.status === 'running' && <WaitingDots />}
-      </div>
-      <div className="execution-node__meta">
-        <span>{correctionLabel(correction)}</span>
-        {correction.severity !== undefined && <span>severity {correction.severity.toFixed(2)}</span>}
-        {correction.numMutations !== undefined && <span>{correction.numMutations} fixes</span>}
       </div>
     </motion.div>
   )

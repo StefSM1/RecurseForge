@@ -5,6 +5,7 @@ import ResourceMonitor from './components/ResourceMonitor'
 import { useWebSocket } from './hooks/useWebSocket'
 import { BACKEND_BASE_URL } from './config'
 import type { GraphEntity } from './types/events'
+import { buildOwnerExecutionViews } from './components/executionState'
 
 type Tab = 'agents' | 'resources'
 type RootStatus = 'offline' | 'running' | 'success' | 'error'
@@ -15,10 +16,17 @@ function App() {
   const [selection, setSelection] = useState<{
     kind: GraphEntity['kind']; id: string
   } | null>(null)
-  const [showRootPrompt, setShowRootPrompt] = useState(false)
   const [showOutputDetail, setShowOutputDetail] = useState(false)
 
   const { connected, run, nodes, sandboxRuns, corrections, events } = useWebSocket()
+  const retryingOwners = useMemo(() => new Set(
+    buildOwnerExecutionViews(
+      Array.from(nodes.values()),
+      Array.from(sandboxRuns.values()),
+      Array.from(corrections.values()),
+      run,
+    ).filter(view => view.retrying).map(view => view.ownerId),
+  ), [nodes, sandboxRuns, corrections, run])
 
   // Poll VRAM for summary bar
   const [vramMb, setVramMb] = useState<number>(0)
@@ -75,9 +83,21 @@ function App() {
 
   const selectedEntity: GraphEntity | null = useMemo(() => {
     if (!selection) return null
+    if (selection.kind === 'root') {
+      return {
+        kind: 'root',
+        value: {
+          id: 'root', task: rootTask,
+          status: retryingOwners.has('root') ? 'retrying' : rootStatus,
+        },
+      }
+    }
     if (selection.kind === 'agent') {
       const value = nodes.get(selection.id)
-      return value ? { kind: 'agent', value } : null
+      return value ? {
+        kind: 'agent',
+        value: retryingOwners.has(value.id) ? { ...value, status: 'retrying' } : value,
+      } : null
     }
     if (selection.kind === 'sandbox') {
       const value = sandboxRuns.get(selection.id)
@@ -85,13 +105,15 @@ function App() {
     }
     const value = corrections.get(selection.id)
     return value ? { kind: 'correction', value } : null
-  }, [selection, nodes, sandboxRuns, corrections])
+  }, [
+    selection, nodes, sandboxRuns, corrections, rootTask, rootStatus,
+    retryingOwners,
+  ])
 
   const handleNodeClick = useCallback((nodeId: string) => {
     setSelection(previous => previous?.kind === 'agent' && previous.id === nodeId
       ? null
       : { kind: 'agent', id: nodeId })
-    setShowRootPrompt(false)
     setShowOutputDetail(false)
   }, [])
 
@@ -99,27 +121,18 @@ function App() {
     setSelection(previous => previous?.kind === 'sandbox' && previous.id === sandboxId
       ? null
       : { kind: 'sandbox', id: sandboxId })
-    setShowRootPrompt(false)
-    setShowOutputDetail(false)
-  }, [])
-
-  const handleCorrectionClick = useCallback((correctionId: string) => {
-    setSelection(previous => previous?.kind === 'correction' && previous.id === correctionId
-      ? null
-      : { kind: 'correction', id: correctionId })
-    setShowRootPrompt(false)
     setShowOutputDetail(false)
   }, [])
 
   const handleRootClick = useCallback(() => {
-    setShowRootPrompt(prev => !prev)
+    setSelection(previous => previous?.kind === 'root'
+      ? null
+      : { kind: 'root', id: 'root' })
     setShowOutputDetail(false)
-    setSelection(null)
   }, [])
 
   const handleOutputClick = useCallback(() => {
     setShowOutputDetail(prev => !prev)
-    setShowRootPrompt(false)
     setSelection(null)
   }, [])
 
@@ -222,7 +235,6 @@ function App() {
                 run={run}
                 onNodeClick={handleNodeClick}
                 onSandboxClick={handleSandboxClick}
-                onCorrectionClick={handleCorrectionClick}
                 rootStatus={rootStatus}
                 rootTask={rootTask}
                 outputStatus={outputStatus}
@@ -232,39 +244,10 @@ function App() {
               />
               <NodeDetailPanel
                 entity={selectedEntity}
+                sandboxRuns={Array.from(sandboxRuns.values())}
+                corrections={Array.from(corrections.values())}
                 onClose={() => setSelection(null)}
               />
-              {/* Root prompt overlay */}
-              {showRootPrompt && (
-                <div className="absolute right-0 top-0 bottom-0 w-80 bg-panel border-l border-border
-                                overflow-y-auto z-10 p-4">
-                  <div className="flex items-center justify-between mb-4">
-                    <h3 className="text-sm font-semibold text-text-primary">Root Agent Prompt</h3>
-                    <button onClick={() => setShowRootPrompt(false)}
-                      className="text-text-secondary hover:text-text-primary w-6 h-6 flex items-center justify-center rounded">×</button>
-                  </div>
-                  <div className="space-y-3">
-                    <div>
-                      <span className="text-xs text-text-secondary">Status</span>
-                      <p className="text-sm text-text-primary capitalize">{rootStatus}</p>
-                    </div>
-                    <div>
-                      <span className="text-xs text-text-secondary">Events received</span>
-                      <p className="text-sm font-mono text-text-primary">{events.length}</p>
-                    </div>
-                    <div>
-                      <span className="text-xs text-text-secondary">Event log</span>
-                      <div className="mt-1 space-y-1 max-h-64 overflow-y-auto">
-                        {events.map((e, i) => (
-                          <div key={i} className="text-xs font-mono text-text-secondary/60 bg-surface rounded p-1">
-                            {e.event_type} {JSON.stringify(e.payload).slice(0, 80)}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              )}
               {/* Output detail overlay */}
               {showOutputDetail && (
                 <div className="absolute right-0 top-0 bottom-0 w-80 bg-panel border-l border-border

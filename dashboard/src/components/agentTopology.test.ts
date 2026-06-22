@@ -108,24 +108,32 @@ describe('buildExecutionEdges', () => {
     expect(edges.map(edge => ({ id: edge.id, data: edge.data }))).toEqual([
       {
         id: 'flow-root-a',
-        data: { phase: 'spawn', delayMs: 0, durationMs: EDGE_DRAW_DURATION_MS },
+        data: {
+          phase: 'spawn', route: 'branch', delayMs: 0,
+          durationMs: EDGE_DRAW_DURATION_MS,
+        },
       },
       {
         id: 'flow-root-b',
         data: {
           phase: 'spawn',
+          route: 'branch',
           delayMs: EDGE_STAGGER_MS,
           durationMs: EDGE_DRAW_DURATION_MS,
         },
       },
       {
         id: 'flow-a-output',
-        data: { phase: 'result', delayMs: 0, durationMs: EDGE_DRAW_DURATION_MS },
+        data: {
+          phase: 'result', route: 'gutter', delayMs: 0,
+          durationMs: EDGE_DRAW_DURATION_MS,
+        },
       },
       {
         id: 'flow-b-output',
         data: {
           phase: 'result',
+          route: 'gutter',
           delayMs: EDGE_STAGGER_MS,
           durationMs: EDGE_DRAW_DURATION_MS,
         },

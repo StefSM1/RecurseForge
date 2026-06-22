@@ -1,8 +1,12 @@
 import { motion, AnimatePresence } from 'framer-motion'
 import type { GraphEntity } from '../types/events'
+import type { CorrectionRun, SandboxRun } from '../types/events'
+import { buildRetryCycles } from './executionState'
 
 interface NodeDetailPanelProps {
   entity: GraphEntity | null
+  sandboxRuns: SandboxRun[]
+  corrections: CorrectionRun[]
   onClose: () => void
 }
 
@@ -31,7 +35,26 @@ function Preview({ label, value }: { label: string; value?: string }) {
   )
 }
 
-export default function NodeDetailPanel({ entity, onClose }: NodeDetailPanelProps) {
+function StrategyLabel({ corrections }: { corrections: CorrectionRun[] }) {
+  if (corrections.length === 0) return <span>Waiting for retry decision</span>
+  return (
+    <span>{corrections.map(item => (
+      item.strategy === 'textgrad' ? 'TextGrad' : 'LLM Retry'
+    )).join(' -> ')}</span>
+  )
+}
+
+export default function NodeDetailPanel({
+  entity, sandboxRuns, corrections, onClose,
+}: NodeDetailPanelProps) {
+  const ownerId = entity?.kind === 'root'
+    ? 'root'
+    : entity?.kind === 'agent'
+      ? entity.value.id
+      : null
+  const retryCycles = ownerId
+    ? buildRetryCycles(ownerId, sandboxRuns, corrections)
+    : []
   return (
     <AnimatePresence>
       {entity && (
@@ -45,13 +68,21 @@ export default function NodeDetailPanel({ entity, onClose }: NodeDetailPanelProp
           <div className="p-4">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-sm font-semibold text-text-primary capitalize">
-                {entity.kind} details
+                {entity.kind === 'root' ? 'Root agent' : entity.kind} details
               </h3>
               <button
                 onClick={onClose}
                 className="text-text-secondary hover:text-text-primary w-6 h-6 flex items-center justify-center rounded"
               >x</button>
             </div>
+
+            {entity.kind === 'root' && (
+              <>
+                <Field label="Node ID" value="root" mono />
+                <Field label="Status" value={entity.value.status} />
+                <Field label="Task" value={entity.value.task || 'Waiting for task...'} />
+              </>
+            )}
 
             {entity.kind === 'agent' && (
               <>
@@ -65,6 +96,54 @@ export default function NodeDetailPanel({ entity, onClose }: NodeDetailPanelProp
                 {entity.value.attempts !== undefined && <Field label="Attempts" value={entity.value.attempts} mono />}
                 <Preview label="Result" value={entity.value.result} />
               </>
+            )}
+
+            {ownerId && retryCycles.length > 0 && (
+              <div className="mt-5 border-t border-border pt-4">
+                <h4 className="text-xs font-semibold uppercase tracking-wider text-text-secondary mb-3">
+                  Retry history
+                </h4>
+                <div className="space-y-3">
+                  {retryCycles.map(cycle => (
+                    <section
+                      key={cycle.attempt.id}
+                      className="rounded-lg border border-accent-red/20 bg-surface/70 p-3"
+                    >
+                      <div className="flex items-center justify-between border-b border-border pb-2 mb-2">
+                        <span className="text-xs font-semibold text-accent-red">
+                          Failed attempt {cycle.attempt.attempt}
+                        </span>
+                        <span className="text-[10px] font-mono text-text-secondary">
+                          exit {cycle.attempt.exitCode ?? '?'}
+                        </span>
+                      </div>
+                      <div className="text-xs text-text-secondary mb-2">
+                        Strategy: <span className="text-text-primary"><StrategyLabel corrections={cycle.corrections} /></span>
+                      </div>
+                      {cycle.corrections.map(correction => (
+                        <div key={correction.id} className="mb-2 last:mb-0">
+                          <div className="flex gap-2 text-[10px] font-mono text-text-secondary">
+                            <span>{correction.strategy === 'textgrad' ? 'TextGrad' : 'LLM retry'}</span>
+                            <span>{correction.status}</span>
+                            <span>{correction.phase.replace('_', ' ')}</span>
+                          </div>
+                          {correction.mutations.map((mutation, index) => (
+                            <pre key={`${mutation.line}-${index}`} className="mt-1 whitespace-pre-wrap text-[10px] text-accent-purple font-mono">
+                              {`L${mutation.line || '?'}: ${mutation.cause}\nFix: ${mutation.suggestion}`}
+                            </pre>
+                          ))}
+                          {correction.error && (
+                            <pre className="mt-1 whitespace-pre-wrap text-[10px] text-accent-red font-mono">
+                              {correction.error}
+                            </pre>
+                          )}
+                        </div>
+                      ))}
+                      <Preview label="Sandbox error / traceback" value={cycle.attempt.stderr} />
+                    </section>
+                  ))}
+                </div>
+              </div>
             )}
 
             {entity.kind === 'sandbox' && (

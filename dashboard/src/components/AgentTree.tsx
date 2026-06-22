@@ -17,7 +17,6 @@ import {
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion'
-import dagre from 'dagre'
 import type { AgentNode } from '../types/events'
 import type { CorrectionRun, RunState, SandboxRun } from '../types/events'
 import {
@@ -26,10 +25,8 @@ import {
   type ExecutionEdgeData,
 } from './agentTopology'
 import { buildWorkflowTopology } from './executionTopology'
-import {
-  CorrectionNodeComponent,
-  SandboxNodeComponent,
-} from './ExecutionNodes'
+import { layoutExecutionGraph } from './executionLayout'
+import { SandboxNodeComponent } from './ExecutionNodes'
 
 // ---------------------------------------------------------------------------
 // Custom Edge: Info Line (thin orange rectangle)
@@ -48,14 +45,41 @@ const edgePalettes = {
 }
 
 function InfoLineEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProps) {
-  // Orthogonal path: down from source, horizontal, then down to target
-  const midY = (sourceY + targetY) / 2
-  const path = `M ${sourceX},${sourceY} L ${sourceX},${midY} L ${targetX},${midY} L ${targetX},${targetY}`
   const prefersReducedMotion = useReducedMotion()
   const edgeData = data as AnimatedEdgeData | undefined
+  const route = edgeData?.route ?? 'branch'
+  const feedbackOffset = edgeData?.feedbackOffset ?? 34
+  let path: string
+  if (route === 'horizontal') {
+    const midX = (sourceX + targetX) / 2
+    path = Math.abs(sourceY - targetY) < 2
+      ? `M ${sourceX},${sourceY} L ${targetX},${targetY}`
+      : `M ${sourceX},${sourceY} L ${midX},${sourceY} L ${midX},${targetY} L ${targetX},${targetY}`
+  } else if (route === 'vertical') {
+    const midY = (sourceY + targetY) / 2
+    path = Math.abs(sourceX - targetX) < 2
+      ? `M ${sourceX},${sourceY} L ${targetX},${targetY}`
+      : `M ${sourceX},${sourceY} L ${sourceX},${midY} L ${targetX},${midY} L ${targetX},${targetY}`
+  } else if (route === 'feedback') {
+    const loopX = Math.min(sourceX, targetX) - feedbackOffset
+    path = `M ${sourceX},${sourceY} L ${loopX},${sourceY} L ${loopX},${targetY} L ${targetX},${targetY}`
+  } else if (route === 'feedback-horizontal') {
+    const loopY = Math.min(sourceY, targetY) - feedbackOffset
+    path = `M ${sourceX},${sourceY} L ${sourceX},${loopY} L ${targetX},${loopY} L ${targetX},${targetY}`
+  } else if (route === 'gutter') {
+    const gutterX = targetX - 70
+    const departureY = sourceY + 48
+    path = `M ${sourceX},${sourceY} L ${sourceX},${departureY} L ${gutterX},${departureY} L ${gutterX},${targetY} L ${targetX},${targetY}`
+  } else {
+    const midY = (sourceY + targetY) / 2
+    path = `M ${sourceX},${sourceY} L ${sourceX},${midY} L ${targetX},${midY} L ${targetX},${targetY}`
+  }
   const palette = edgePalettes[edgeData?.tone ?? 'orange']
   const delayMs = edgeData?.delayMs ?? 0
   const durationMs = edgeData?.durationMs ?? 900
+  const feedbackState = edgeData?.feedbackState ?? 'none'
+  const isFeedback = edgeData?.phase === 'feedback'
+  const isWithdrawing = isFeedback && feedbackState === 'withdrawing'
   const shouldDraw = Boolean(edgeData?.shouldAnimate && !prefersReducedMotion)
   const overlayDelayMs = shouldDraw ? delayMs + durationMs * 0.72 : 0
 
@@ -68,7 +92,7 @@ function InfoLineEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProp
         style={{
           stroke: palette.main,
           strokeWidth: 6,
-          strokeOpacity: 0.14,
+          strokeOpacity: isWithdrawing ? 0 : 0.14,
           strokeLinecap: 'round',
           strokeLinejoin: 'round',
         }}
@@ -77,17 +101,30 @@ function InfoLineEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProp
         d={path}
         fill="none"
         className="info-line__main"
-        initial={shouldDraw
-          ? { pathLength: 0, opacity: 0.25 }
-          : { pathLength: 1, opacity: 1 }}
-        animate={{ pathLength: 1, opacity: 1 }}
+        initial={isWithdrawing
+          ? prefersReducedMotion
+            ? { pathLength: 0, pathOffset: 1, opacity: 0 }
+            : { pathLength: 1, pathOffset: 0, opacity: 1 }
+          : shouldDraw
+            ? { pathLength: 0, pathOffset: 0, opacity: 0.25 }
+            : { pathLength: 1, pathOffset: 0, opacity: 1 }}
+        animate={isWithdrawing
+          ? { pathLength: 0, pathOffset: 1, opacity: 0 }
+          : { pathLength: 1, pathOffset: 0, opacity: 1 }}
         transition={{
           pathLength: {
-            duration: shouldDraw ? durationMs / 1000 : 0,
+            duration: isWithdrawing && !prefersReducedMotion
+              ? 0.75
+              : shouldDraw ? durationMs / 1000 : 0,
             delay: shouldDraw ? delayMs / 1000 : 0,
             ease: [0.33, 1, 0.68, 1],
           },
-          opacity: { duration: shouldDraw ? 0.2 : 0 },
+          pathOffset: { duration: isWithdrawing && !prefersReducedMotion ? 0.75 : 0 },
+          opacity: {
+            duration: isWithdrawing && !prefersReducedMotion
+              ? 0.68
+              : shouldDraw ? 0.2 : 0,
+          },
         }}
         onAnimationComplete={() => {
           if (shouldDraw) edgeData?.onDrawComplete(id)
@@ -99,7 +136,7 @@ function InfoLineEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProp
           strokeLinejoin: 'round',
         }}
       />
-      {!prefersReducedMotion && (
+      {!prefersReducedMotion && !isWithdrawing && (
         <motion.path
           d={path}
           fill="none"
@@ -113,7 +150,7 @@ function InfoLineEdge({ id, sourceX, sourceY, targetX, targetY, data }: EdgeProp
           }}
         />
       )}
-      {!prefersReducedMotion && (
+      {!prefersReducedMotion && !isFeedback && (
         <circle r="2.4" className="info-line__pulse" style={{ fill: palette.pulse }}>
           <animateMotion
             path={path}
@@ -141,7 +178,7 @@ const hiddenHandleStyle = {
 // ---------------------------------------------------------------------------
 
 interface RootNodeData {
-  status: 'offline' | 'running' | 'success' | 'error'
+  status: 'offline' | 'running' | 'retrying' | 'success' | 'error'
   task: string
   onClick: () => void
 }
@@ -149,6 +186,7 @@ interface RootNodeData {
 function RootNodeComponent({ data }: { data: RootNodeData }) {
   const isOffline = data.status === 'offline'
   const isRunning = data.status === 'running'
+  const isRetrying = data.status === 'retrying'
   const isError = data.status === 'error'
 
   return (
@@ -160,7 +198,9 @@ function RootNodeComponent({ data }: { data: RootNodeData }) {
         px-5 py-3 rounded-xl border-2 cursor-pointer min-w-[200px] text-center
         ${isOffline
           ? 'border-gray-600 bg-gray-800/80'
-          : isRunning
+          : isRetrying
+            ? 'border-accent-yellow/60 bg-accent-yellow/5'
+            : isRunning
             ? 'border-accent-green bg-accent-green/10 shadow-[0_0_20px_rgba(34,197,94,0.3)]'
             : isError
               ? 'border-accent-red/60 bg-accent-red/5'
@@ -168,11 +208,14 @@ function RootNodeComponent({ data }: { data: RootNodeData }) {
         }
       `}
     >
-      <Handle type="source" position={Position.Bottom} style={hiddenHandleStyle} />
+      <Handle id="spawn-out" type="source" position={Position.Bottom} style={hiddenHandleStyle} />
+      <Handle id="forward-out" type="source" position={Position.Bottom} style={hiddenHandleStyle} />
+      <Handle id="direct-out" type="source" position={Position.Right} style={hiddenHandleStyle} />
+      <Handle id="feedback-top" type="target" position={Position.Top} style={hiddenHandleStyle} />
       <div className="flex items-center justify-center gap-2 mb-1">
-        {isRunning ? (
+        {isRunning || isRetrying ? (
           <motion.div
-            className="w-3 h-3 rounded-full bg-accent-green"
+            className={`w-3 h-3 rounded-full ${isRetrying ? 'bg-accent-yellow' : 'bg-accent-green'}`}
             animate={{
               boxShadow: [
                 '0 0 0 0 rgba(34, 197, 94, 0.6)',
@@ -194,9 +237,9 @@ function RootNodeComponent({ data }: { data: RootNodeData }) {
         {data.task || 'Waiting for task...'}
       </p>
       <p className={`text-xs mt-1 capitalize ${
-        isOffline ? 'text-gray-500' : isError ? 'text-accent-red' : isRunning ? 'text-accent-green' : 'text-accent-green/60'
+        isOffline ? 'text-gray-500' : isError ? 'text-accent-red' : isRetrying ? 'text-accent-yellow' : isRunning ? 'text-accent-green' : 'text-accent-green/60'
       }`}>
-        {data.status}
+        {isRetrying ? 'retrying...' : data.status}
       </p>
     </motion.div>
   )
@@ -231,7 +274,7 @@ function OutputNodeComponent({ data }: { data: OutputNodeData }) {
       `}
       style={{ background: 'rgb(30, 30, 46)' }}
     >
-      <Handle type="target" position={Position.Top} style={hiddenHandleStyle} />
+      <Handle id="result-in" type="target" position={Position.Left} style={hiddenHandleStyle} />
       <div className="flex items-center justify-center gap-2 mb-1">
         <div className={`w-3 h-3 rounded-full ${
           isWaiting ? 'bg-gray-500' : data.status === 'error' ? 'bg-accent-red' : 'bg-accent-blue'
@@ -315,10 +358,11 @@ function SubAgentNodeComponent({ data }: { data: SubAgentNodeData }) {
         min-w-[180px] max-w-[260px] ${borderColor}
       `}
     >
-      <Handle type="target" position={Position.Top} style={hiddenHandleStyle} />
-      <Handle type="source" position={Position.Bottom} style={hiddenHandleStyle} />
+      <Handle id="spawn-in" type="target" position={Position.Top} style={hiddenHandleStyle} />
+      <Handle id="forward-out" type="source" position={Position.Bottom} style={hiddenHandleStyle} />
+      <Handle id="feedback-in" type="target" position={Position.Left} style={hiddenHandleStyle} />
       <div className="flex items-center gap-2 mb-1">
-        {data.status === 'running' ? (
+        {data.status === 'running' || data.status === 'retrying' ? (
           <motion.div
             className={`w-2.5 h-2.5 rounded-full ${dotColor}`}
             animate={{
@@ -340,55 +384,10 @@ function SubAgentNodeComponent({ data }: { data: SubAgentNodeData }) {
         {data.task}
       </p>
       <p className="text-xs text-text-secondary mt-1 capitalize">
-        {data.status}
+        {data.status === 'retrying' ? 'retrying...' : data.status}
       </p>
     </motion.div>
   )
-}
-
-// ---------------------------------------------------------------------------
-// Layout engine (dagre)
-// ---------------------------------------------------------------------------
-
-function nodeDimensions(node: Node): { width: number; height: number } {
-  if (node.type === 'sandbox') return { width: 180, height: 70 }
-  if (node.type === 'correction') return { width: 172, height: 64 }
-  return { width: 220, height: 80 }
-}
-
-function getLayoutedElements(
-  nodes: Node[],
-  edges: Edge[],
-  layoutEdges: Edge[] = edges,
-): { nodes: Node[]; edges: Edge[] } {
-  const g = new dagre.graphlib.Graph()
-  g.setDefaultEdgeLabel(() => ({}))
-  g.setGraph({ rankdir: 'TB', nodesep: 60, ranksep: 100 })
-
-  nodes.forEach(node => {
-    g.setNode(node.id, nodeDimensions(node))
-  })
-  layoutEdges.forEach(edge => {
-    g.setEdge(edge.source, edge.target)
-  })
-
-  dagre.layout(g)
-
-  const layoutedNodes = nodes.map(node => {
-    const pos = g.node(node.id)
-    const dimensions = nodeDimensions(node)
-    return {
-      ...node,
-      position: {
-        x: pos.x - dimensions.width / 2,
-        y: pos.y - dimensions.height / 2,
-      },
-      sourcePosition: Position.Bottom,
-      targetPosition: Position.Top,
-    }
-  })
-
-  return { nodes: layoutedNodes, edges }
 }
 
 // ---------------------------------------------------------------------------
@@ -402,7 +401,6 @@ interface AgentTreeProps {
   run: RunState | null
   onNodeClick: (nodeId: string) => void
   onSandboxClick: (sandboxId: string) => void
-  onCorrectionClick: (correctionId: string) => void
   rootStatus: 'offline' | 'running' | 'success' | 'error'
   rootTask: string
   outputStatus: 'waiting' | 'success' | 'error'
@@ -416,7 +414,6 @@ const nodeTypes: NodeTypes = {
   output: OutputNodeComponent,
   agent: SubAgentNodeComponent,
   sandbox: SandboxNodeComponent,
-  correction: CorrectionNodeComponent,
 }
 
 const edgeTypes: EdgeTypes = {
@@ -425,7 +422,7 @@ const edgeTypes: EdgeTypes = {
 
 export default function AgentTree({
   nodes, sandboxRuns, corrections, run,
-  onNodeClick, onSandboxClick, onCorrectionClick, rootStatus, rootTask,
+  onNodeClick, onSandboxClick, rootStatus, rootTask,
   outputStatus, outputSummary, onRootClick, onOutputClick,
 }: AgentTreeProps) {
   const flowInstanceRef = useRef<ReactFlowInstance | null>(null)
@@ -440,12 +437,28 @@ export default function AgentTree({
   const { flowNodes, flowEdges } = useMemo(() => {
     const rawNodes: Node[] = []
     const rawEdges: Edge[] = []
+    const agentNodes = Array.from(nodes.values())
+    const sandboxAttempts = Array.from(sandboxRuns.values())
+    const correctionNodes = Array.from(corrections.values())
+    const workflow = buildWorkflowTopology(
+      agentNodes, sandboxAttempts, correctionNodes, run,
+    )
+    const sandboxNodes = workflow.sandboxNodes
+    const retryingOwners = new Set(
+      workflow.ownerViews.filter(view => view.retrying).map(view => view.ownerId),
+    )
+    const executionEdges = workflow.renderEdges
+    const layoutEdges = workflow.layoutEdges
 
     // Always-present root node
     rawNodes.push({
       id: 'root',
       type: 'root',
-      data: { status: rootStatus, task: rootTask, onClick: onRootClick },
+      data: {
+        status: retryingOwners.has('root') ? 'retrying' : rootStatus,
+        task: rootTask,
+        onClick: onRootClick,
+      },
       position: { x: 0, y: 0 },
     })
 
@@ -457,12 +470,6 @@ export default function AgentTree({
       position: { x: 0, y: 0 },
     })
 
-    const agentNodes = Array.from(nodes.values())
-    const sandboxNodes = Array.from(sandboxRuns.values())
-    const correctionNodes = Array.from(corrections.values())
-    const workflow = buildWorkflowTopology(agentNodes, sandboxNodes, correctionNodes, run)
-    const executionEdges = workflow.renderEdges
-    const layoutEdges = workflow.layoutEdges
     const incomingSpawnEdges = new Map(
       executionEdges
         .filter(edge => edge.data.phase === 'spawn')
@@ -482,7 +489,7 @@ export default function AgentTree({
         id: agent.id,
         type: 'agent',
         data: {
-          status: agent.status,
+          status: retryingOwners.has(agent.id) ? 'retrying' : agent.status,
           task: agent.task,
           node_id: agent.id,
           onClick: () => onNodeClick(agent.id),
@@ -504,28 +511,9 @@ export default function AgentTree({
         type: 'sandbox',
         data: {
           sandbox,
-          onClick: () => onSandboxClick(sandbox.id),
+          onClick: () => onSandboxClick(sandbox.executionId),
           revealDelayMs,
           shouldAnimateReveal: animationRegistry.shouldRevealNode(sandbox.id),
-          onRevealComplete: markNodeRevealed,
-        },
-        position: { x: 0, y: 0 },
-      })
-    })
-
-    correctionNodes.forEach(correction => {
-      const incomingEdge = executionEdges.find(edge => edge.target === correction.id)
-      const revealDelayMs = incomingEdge
-        ? incomingEdge.data.delayMs + incomingEdge.data.durationMs - NODE_REVEAL_LEAD_MS
-        : 0
-      rawNodes.push({
-        id: correction.id,
-        type: 'correction',
-        data: {
-          correction,
-          onClick: () => onCorrectionClick(correction.id),
-          revealDelayMs,
-          shouldAnimateReveal: animationRegistry.shouldRevealNode(correction.id),
           onRevealComplete: markNodeRevealed,
         },
         position: { x: 0, y: 0 },
@@ -541,13 +529,17 @@ export default function AgentTree({
       },
     })))
 
-    const { nodes: layoutedNodes, edges: layoutedEdges } =
-      getLayoutedElements(rawNodes, rawEdges, layoutEdges)
+    const layoutedNodes = layoutExecutionGraph(
+      rawNodes,
+      layoutEdges,
+      agentNodes,
+      sandboxNodes,
+    )
 
-    return { flowNodes: layoutedNodes, flowEdges: layoutedEdges }
+    return { flowNodes: layoutedNodes, flowEdges: rawEdges }
   }, [
     nodes, sandboxRuns, corrections, run, rootStatus, rootTask, outputStatus, outputSummary,
-    onNodeClick, onSandboxClick, onCorrectionClick,
+    onNodeClick, onSandboxClick,
     onRootClick, onOutputClick, markEdgeDrawn, markNodeRevealed,
     animationRegistry,
   ])

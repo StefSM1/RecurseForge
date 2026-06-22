@@ -65,6 +65,34 @@ describe('dashboard execution reducer', () => {
     expect(replayed.events).toHaveLength(1)
   })
 
+  it('isolates graph maps when a new run starts', () => {
+    let state = reduceEngineEvent(createDashboardDataState(), event(
+      'run_started', { task: 'First', mode: 'delegated' }, 1,
+    ))
+    state = reduceEngineEvent(state, event('node_spawn', {
+      node_id: 'agent-a', parent_id: 'root', task: 'A',
+    }, 2))
+    const secondRun: EngineEvent = {
+      event_id: 'second-run',
+      run_id: 'run-2',
+      event_type: 'run_started',
+      payload: { task: 'Second', mode: 'direct' },
+      timestamp: 3,
+    }
+    state = reduceEngineEvent(state, secondRun)
+    expect(state.run?.id).toBe('run-2')
+    expect(state.nodes.size).toBe(0)
+    expect(state.sandboxRuns.size).toBe(0)
+    expect(state.corrections.size).toBe(0)
+  })
+
+  it('stores the run id on spawned agents', () => {
+    const state = reduceEngineEvent(createDashboardDataState(), event('node_spawn', {
+      node_id: 'agent-a', parent_id: 'root', task: 'A',
+    }, 1))
+    expect(state.nodes.get('agent-a')?.runId).toBe('run-1')
+  })
+
   it('does not overwrite agent status when legacy gradient telemetry arrives', () => {
     let state = reduceEngineEvent(createDashboardDataState(), event('node_spawn', {
       node_id: 'agent-a', parent_id: 'root', task: 'A',

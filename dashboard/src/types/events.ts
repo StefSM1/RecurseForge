@@ -136,6 +136,7 @@ export type AgentStatus = 'running' | 'success' | 'failed' | 'retrying' | 'gradi
 
 export interface AgentNode {
   id: string
+  runId?: string
   parentId: string
   task: string
   status: AgentStatus
@@ -197,7 +198,14 @@ export interface RunState {
   resultSummary?: string
 }
 
+export interface RootAgentView {
+  id: 'root'
+  task: string
+  status: 'offline' | 'running' | 'retrying' | 'success' | 'error'
+}
+
 export type GraphEntity =
+  | { kind: 'root'; value: RootAgentView }
   | { kind: 'agent'; value: AgentNode }
   | { kind: 'sandbox'; value: SandboxRun }
   | { kind: 'correction'; value: CorrectionRun }
