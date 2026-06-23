@@ -1,7 +1,8 @@
-import { useState, useCallback, useEffect, useMemo } from 'react'
+import { useState, useCallback, useMemo } from 'react'
 import AgentTree from './components/AgentTree'
 import NodeDetailPanel from './components/NodeDetailPanel'
 import ResourceMonitor from './components/ResourceMonitor'
+import SummaryBar from './components/SummaryBar'
 import { useWebSocket } from './hooks/useWebSocket'
 import { BACKEND_BASE_URL } from './config'
 import type { GraphEntity } from './types/events'
@@ -27,23 +28,6 @@ function App() {
       run,
     ).filter(view => view.retrying).map(view => view.ownerId),
   ), [nodes, sandboxRuns, corrections, run])
-
-  // Poll VRAM for summary bar
-  const [vramMb, setVramMb] = useState<number>(0)
-  useEffect(() => {
-    const poll = async () => {
-      try {
-        const res = await fetch(`${BACKEND_BASE_URL}/api/resources`)
-        if (res.ok) {
-          const data = await res.json()
-          setVramMb(data.vram_mb ?? 0)
-        }
-      } catch { /* ignore */ }
-    }
-    poll()
-    const timer = setInterval(poll, 3000)
-    return () => clearInterval(timer)
-  }, [])
 
   // Derive root and output state from events
   const { rootStatus, rootTask, outputStatus, outputSummary } = useMemo(() => {
@@ -136,11 +120,9 @@ function App() {
     setSelection(null)
   }, [])
 
-  // Summary stats
-  const totalNodes = nodes.size
-  const successCount = Array.from(nodes.values()).filter(n => n.status === 'success').length
-  const failedCount = Array.from(nodes.values()).filter(n => n.status === 'failed').length
-  const runningCount = Array.from(nodes.values()).filter(n => n.status === 'running').length
+  const runningCount = Array.from(nodes.values()).filter(n =>
+    n.status === 'running' || retryingOwners.has(n.id),
+  ).length + (retryingOwners.has('root') ? 1 : 0)
 
   return (
     <div className="flex h-full bg-surface text-text-primary font-sans">
@@ -288,45 +270,14 @@ function App() {
           )}
         </div>
 
-        {/* Bottom: Summary Bar */}
-        <div className="h-14 bg-panel border-t border-border flex items-center px-4 gap-6">
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-text-secondary">Nodes:</span>
-            <span className="text-xs text-accent-blue font-mono">{totalNodes}</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-accent-green font-mono">
-              ✓ {successCount}
-            </span>
-            <span className="text-xs text-accent-red font-mono">
-              ✗ {failedCount}
-            </span>
-            {runningCount > 0 && (
-              <span className="text-xs text-accent-blue font-mono">
-                ● {runningCount} running
-              </span>
-            )}
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-text-secondary">Events:</span>
-            <span className="text-xs text-text-primary font-mono">{events.length}</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-text-secondary">Sandbox:</span>
-            <span className="text-xs text-accent-yellow font-mono">{sandboxRuns.size}</span>
-          </div>
-          <div className="ml-auto flex items-center gap-2">
-            <span className="text-xs text-text-secondary">VRAM:</span>
-            <span className={`text-xs font-mono ${
-              vramMb > 7000 ? 'text-accent-red'
-              : vramMb > 6500 ? 'text-accent-yellow'
-              : vramMb > 0 ? 'text-accent-green'
-              : 'text-text-secondary'
-            }`}>
-              {vramMb > 0 ? `${vramMb} MB` : '— MB'}
-            </span>
-          </div>
-        </div>
+        <SummaryBar
+          run={run}
+          nodes={nodes}
+          sandboxRuns={sandboxRuns}
+          eventCount={events.length}
+          rootTask={rootTask}
+          retryingOwnerIds={retryingOwners}
+        />
       </main>
 
       {/* Right Panel: Chat Interface */}
