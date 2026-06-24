@@ -19,11 +19,15 @@ import asyncio
 import logging
 import queue
 import sys
+import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
+from uuid import uuid4
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+import yaml
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 # Ensure project root is importable
@@ -47,6 +51,10 @@ _event_queue: queue.Queue[dict] = queue.Queue()
 
 # Background bridge task reference
 _bridge_task: asyncio.Task | None = None
+_dashboard_started_bus = False
+
+_chat_runs_lock = threading.Lock()
+_chat_runs: dict[str, dict[str, Any]] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -56,7 +64,8 @@ _bridge_task: asyncio.Task | None = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Start the event queue bridge task once uvicorn's event loop is active."""
-    global _bridge_task
+    global _bridge_task, _dashboard_started_bus
+    _dashboard_started_bus = _ensure_event_bus_running()
     _bridge_task = asyncio.create_task(_queue_to_websocket_bridge())
     _start_event_bus_bridge()
     logger.info("[Dashboard] Lifespan: queue bridge task started")
@@ -65,6 +74,13 @@ async def lifespan(app: FastAPI):
     if _bridge_task:
         _bridge_task.cancel()
     _bridge_task = None
+    if _dashboard_started_bus:
+        try:
+            from harness.event_bus import get_event_bus
+            get_event_bus().stop()
+        except Exception as exc:
+            logger.debug("[Dashboard] Event bus shutdown skipped: %s", exc)
+    _dashboard_started_bus = False
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +245,73 @@ async def get_resources():
     return resources
 
 
+@app.post("/api/chat/runs")
+async def start_chat_run(request_data: dict):
+    """Start one dashboard-owned recursive agent run from the chat panel."""
+    message = str(request_data.get("message", "")).strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="message is required")
+
+    with _chat_runs_lock:
+        active = [
+            run for run in _chat_runs.values()
+            if run["status"] in {"pending", "running", "stopping"}
+        ]
+        if active:
+            raise HTTPException(
+                status_code=409,
+                detail="another chat run is already active",
+            )
+
+        run_id = "chat-{}".format(uuid4().hex)
+        record = {
+            "run_id": run_id,
+            "prompt": message,
+            "status": "pending",
+            "created_at": time.time(),
+            "started_at": None,
+            "completed_at": None,
+            "final_output": None,
+            "error": None,
+            "stop_requested": False,
+        }
+        _chat_runs[run_id] = record
+
+    thread = threading.Thread(
+        target=_run_chat_graph,
+        args=(run_id, message),
+        daemon=True,
+        name="dashboard-chat-{}".format(run_id[:13]),
+    )
+    thread.start()
+
+    return _public_chat_run(record)
+
+
+@app.get("/api/chat/runs/{run_id}")
+async def get_chat_run(run_id: str):
+    """Return the current status and final output for a chat-launched run."""
+    record = _get_chat_run_or_404(run_id)
+    return _public_chat_run(record)
+
+
+@app.post("/api/chat/runs/{run_id}/stop")
+async def stop_chat_run(run_id: str):
+    """Best-effort stop: marks the run stopped/canceling in dashboard state."""
+    with _chat_runs_lock:
+        record = _chat_runs.get(run_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="run not found")
+
+        record["stop_requested"] = True
+        if record["status"] in {"pending", "running"}:
+            record["status"] = "stopping"
+        elif record["status"] == "stopping":
+            pass
+
+    return _public_chat_run(record)
+
+
 @app.post("/api/test/event")
 async def inject_test_event(request_data: dict):
     """Inject a test event into the WebSocket stream (for development/testing)."""
@@ -290,6 +373,139 @@ def _start_event_bus_bridge():
     except ImportError as e:
         logger.warning("[Dashboard] Could not connect to event bus: %s. "
                        "Dashboard will work without live events.", e)
+
+
+# ---------------------------------------------------------------------------
+# Chat run helpers
+# ---------------------------------------------------------------------------
+
+def _ensure_event_bus_running() -> bool:
+    """Start the event bus when dashboard_server owns the process lifecycle."""
+    try:
+        from harness.event_bus import get_event_bus
+        bus = get_event_bus()
+        was_running = getattr(bus, "_running", False)
+        bus.start()
+        return not was_running
+    except Exception as exc:
+        logger.warning("[Dashboard] Could not start event bus: %s", exc)
+        return False
+
+
+def _get_chat_run_or_404(run_id: str) -> dict[str, Any]:
+    with _chat_runs_lock:
+        record = _chat_runs.get(run_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        return dict(record)
+
+
+def _public_chat_run(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "run_id": record["run_id"],
+        "prompt": record["prompt"],
+        "status": record["status"],
+        "created_at": record["created_at"],
+        "started_at": record["started_at"],
+        "completed_at": record["completed_at"],
+        "final_output": record["final_output"],
+        "error": record["error"],
+        "stop_requested": record["stop_requested"],
+    }
+
+
+def _set_chat_run(run_id: str, **updates: Any) -> dict[str, Any] | None:
+    with _chat_runs_lock:
+        record = _chat_runs.get(run_id)
+        if record is None:
+            return None
+        record.update(updates)
+        return dict(record)
+
+
+def _load_dashboard_config() -> dict[str, Any]:
+    config_path = _PROJECT_ROOT / "config.yaml"
+    with config_path.open("r", encoding="utf-8") as file:
+        return yaml.safe_load(file)
+
+
+def _initial_graph_state(run_id: str, prompt: str, config: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "task_id": "root",
+        "run_id": run_id,
+        "task_description": prompt,
+        "status": "init",
+        "children": [],
+        "depth": 0,
+        "results": [],
+        "direct_answer": "",
+        "config": config,
+    }
+
+
+def _format_chat_output(result: dict[str, Any]) -> str:
+    direct = str(result.get("direct_answer") or "").strip()
+    if direct:
+        return direct
+
+    results = result.get("results", [])
+    if not results:
+        return "Run completed without a textual result."
+
+    lines: list[str] = []
+    for index, item in enumerate(results, start=1):
+        task = str(item.get("task") or item.get("node_id") or "Sub-agent")
+        success = bool(item.get("success"))
+        result_text = str(item.get("result") or "").strip()
+        status = "success" if success else "failed"
+        lines.append("[{}] {} ({})".format(index, task, status))
+        if result_text:
+            lines.append(result_text)
+        if item.get("code_executed"):
+            stdout = str(item.get("stdout") or "").strip()
+            stderr = str(item.get("stderr") or "").strip()
+            exit_code = item.get("exit_code", "?")
+            lines.append("Sandbox exit: {}".format(exit_code))
+            if stdout:
+                lines.append("stdout:\n{}".format(stdout))
+            if stderr:
+                lines.append("stderr:\n{}".format(stderr))
+        lines.append("")
+
+    return "\n".join(lines).strip()
+
+
+def _run_chat_graph(run_id: str, prompt: str) -> None:
+    """Invoke the existing recursive graph for a chat-submitted prompt."""
+    _set_chat_run(run_id, status="running", started_at=time.time())
+    try:
+        from engine.graph import build_graph
+
+        config = _load_dashboard_config()
+        graph = build_graph(config)
+        result = graph.invoke(_initial_graph_state(run_id, prompt, config))
+        output = _format_chat_output(result)
+
+        with _chat_runs_lock:
+            record = _chat_runs.get(run_id)
+            if record is None:
+                return
+            record["completed_at"] = time.time()
+            if record.get("stop_requested"):
+                record["status"] = "stopped"
+                record["final_output"] = None
+            else:
+                record["status"] = "success" if result.get("status") == "done" else "failed"
+                record["final_output"] = output
+    except Exception as exc:
+        logger.exception("[Dashboard] Chat run %s failed", run_id)
+        with _chat_runs_lock:
+            record = _chat_runs.get(run_id)
+            if record is None:
+                return
+            record["completed_at"] = time.time()
+            record["status"] = "stopped" if record.get("stop_requested") else "failed"
+            record["error"] = str(exc)
 
 
 # ---------------------------------------------------------------------------

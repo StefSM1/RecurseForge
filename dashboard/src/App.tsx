@@ -1,5 +1,6 @@
 import { useState, useCallback, useMemo } from 'react'
 import AgentTree from './components/AgentTree'
+import ChatInterface from './components/ChatInterface'
 import NodeDetailPanel from './components/NodeDetailPanel'
 import ResourceMonitor from './components/ResourceMonitor'
 import SummaryBar from './components/SummaryBar'
@@ -280,42 +281,7 @@ function App() {
         />
       </main>
 
-      {/* Right Panel: Chat Interface */}
-      <aside className="w-80 bg-panel border-l border-border flex flex-col">
-        <div className="p-3 border-b border-border">
-          <h2 className="text-sm font-medium text-text-primary">Chat</h2>
-          <p className="text-xs text-text-secondary">
-            Send tasks to the engine
-          </p>
-        </div>
-        <div className="flex-1 flex items-center justify-center">
-          <div className="text-center space-y-2">
-            <span className="text-2xl text-text-secondary/40">💬</span>
-            <p className="text-xs text-text-secondary">
-              Chat interface placeholder
-            </p>
-            <p className="text-xs text-text-secondary/60">Stage 5</p>
-          </div>
-        </div>
-        <div className="p-3 border-t border-border">
-          <div className="flex gap-2">
-            <input
-              type="text"
-              disabled
-              placeholder="Chat coming in Stage 5..."
-              className="flex-1 bg-surface rounded-md px-3 py-2 text-xs text-text-primary
-                         placeholder-text-secondary/40 border border-border disabled:opacity-50"
-            />
-            <button
-              disabled
-              className="px-3 py-2 bg-accent-blue/20 text-accent-blue text-xs rounded-md
-                         disabled:opacity-50"
-            >
-              Send
-            </button>
-          </div>
-        </div>
-      </aside>
+      <ChatInterface nodes={nodes} events={events} />
     </div>
   )
 }

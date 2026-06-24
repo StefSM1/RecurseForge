@@ -1,0 +1,1 @@
+.venv\Scripts\python -m harness.cli --dashboard --verbose
