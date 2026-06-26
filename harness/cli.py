@@ -142,6 +142,9 @@ def main():
     logger = logging.getLogger("recurseforge.cli")
     logger.info("Config loaded from %s", args.config)
     logger.info("LLM endpoint: %s", config["llm"]["base_url"])
+    logger.info("LLM context window target: %s tokens; output budget: %s tokens",
+                config["llm"].get("context_window", "server-default"),
+                config["llm"].get("max_tokens", "server-default"))
     logger.info("Recursion: max_depth=%d, max_children=%d",
                 config["recursion"]["max_depth"],
                 config["recursion"]["max_children"])

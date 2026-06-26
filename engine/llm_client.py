@@ -22,7 +22,7 @@ def chat_completion(
     client: OpenAI,
     model: str,
     messages: list[dict],
-    max_tokens: int = 4096,
+    max_tokens: int = 8192,
     temperature: float = 0.3,
     no_think: bool = False,
 ) -> str:

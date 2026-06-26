@@ -71,7 +71,8 @@ START -> init_node -> plan_node --[has children?]--> execute_node -> validate_no
 
 ### Context Layer (`context/`)
 - `repo_map.py`: Tree-sitter FastAPI server. Parses .py/.js/.ts files, extracts
-  symbols, generates XML-packed repo map (~1024 tokens). Endpoints: GET /map,
+  symbols, generates XML-packed repo map (~4096 tokens in 65k-context mode).
+  Endpoints: GET /map,
   POST /lookup, POST /refresh. Path normalization for cross-platform compatibility.
 - `vram_manager.py`: L0/L1/L2 tiered memory. Auto-demotes oldest L0 blocks to L1,
   L1 to L2 (serialized to disk as JSON). Promotes on access.
@@ -131,11 +132,14 @@ All extend VersionedModel with schema_version=1, .to_json(), .from_json().
 
 ## Qwen 3.5 Configuration
 - Model: Qwen3.5-9B-DeepSeek-V4-Flash-MTP (IQ4_XS quantization, ~5GB weights)
-- Server: `llama-server -m <model>.gguf -ngl 99 --ctx-size 4096 --flash-attn on`
+- Server target: `llama-server -m <model>.gguf -ngl 99 --ctx-size 65536 --flash-attn on`
+- KV cache recommendation for 8GB VRAM: Q8 K + Q4 V if available/stable.
 - No MTP (speculative decoding disabled -- overhead exceeds benefit for this model)
-- `max_tokens: 4096` (shared between thinking + content)
+- `context_window: 65536` records the intended server context size.
+- `max_tokens: 8192` is the output budget per call, not the full prompt window.
 - `no_think: true` on plan step via `enable_thinking: false` extra_body param
-- VRAM usage: ~6.3GB idle, leaves ~1.7GB headroom for sub-agents
+- Avoid filling the whole 65k window; keep a safety buffer for generated output,
+  Qwen reasoning, retries, and recursive branches.
 
 ## Phase Status
 - [x] Phase 1: Spawning Graph (LangGraph + ReDel)

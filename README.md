@@ -450,7 +450,7 @@ A standalone FastAPI service that gives sub-agents a "table of contents" for you
                                   ...
 ```
 
-Instead of dumping an entire codebase into the agent's prompt (which would blow up VRAM), the agent sees a compressed **XML map** of class names, function signatures, and line numbers (~1024 tokens). When it needs actual code, it requests specific files or symbols via the `/lookup` endpoint.
+Instead of dumping an entire codebase into the agent's prompt (which would blow up VRAM), the agent sees a compressed **XML map** of class names, function signatures, and line numbers. In 65k-context mode, the default map budget is 4096 tokens: large enough to be useful, still small enough to avoid turning every sub-agent call into a full-codebase prompt. When it needs actual code, it requests specific files or symbols via the `/lookup` endpoint.
 
 ---
 
@@ -727,8 +727,11 @@ Streamlit visualization for the execution tree, gradient flows, VRAM timeline, a
 
 1. **llama.cpp server** running with your Qwen model on port 8080:
    ```
-   llama-server.exe -m path\to\qwen.gguf --port 8080 --ctx-size 4096 --n-gpu-layers 99 -t 8
+   llama-server.exe -m path\to\qwen.gguf --port 8080 --ctx-size 65536 --n-gpu-layers 99 -t 8
    ```
+   If your llama.cpp build supports KV cache quantization, your tested 65k profile
+   of Q8 K + Q4 V cache is the practical target for this project. Keep MTP off
+   unless you have measured that it helps on your hardware.
 
 2. **Python 3.10+** with a virtual environment:
    ```

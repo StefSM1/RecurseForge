@@ -7,10 +7,12 @@ llm:
   base_url: "http://localhost:8080/v1"
   # Model name passed in API requests (llama.cpp accepts any string)
   model_name: "qwen"
-  # Max tokens the model can generate per call.
-  # Qwen 3.5 shares this budget between thinking + content.
-  # 4096 gives enough room for both reasoning and response.
-  max_tokens: 4096
+  # Expected llama.cpp context window. This is documentation/config intent;
+  # the actual active context is set when starting llama-server with --ctx-size.
+  context_window: 65536
+  # Max tokens the model can generate per call. This is output budget, not the
+  # full prompt window. Keep well below context_window to leave room for input.
+  max_tokens: 8192
   # Lower = more deterministic, higher = more creative
   temperature: 0.3
 
@@ -32,7 +34,9 @@ context:
   # Port for the repo-map FastAPI server.
   repo_map_port: 8001
   # Maximum tokens for the repository map overview (GET /map).
-  max_map_tokens: 1024
+  # 65k-context mode can afford a richer map, but this should still stay
+  # compact because every spawned agent receives it.
+  max_map_tokens: 4096
 
 vram:
   # VRAM warning threshold in MB (75% of 8GB).

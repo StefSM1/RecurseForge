@@ -6,7 +6,7 @@ Tree-sitter repository map server (FastAPI).
 Parses a target codebase into an AST index and serves surgical code
 lookups to sub-agents via three endpoints:
 
-    GET  /map      -- full repo map (XML-packed, ~1024 tokens)
+    GET  /map      -- full repo map (XML-packed, configurable token budget)
     POST /lookup   -- specific file / symbol / line range
     POST /refresh  -- re-parse after file changes
 
@@ -164,7 +164,7 @@ class RepoMap:
                 return c.text.decode("utf-8") if c.text else "()"
         return "()"
 
-    def generate_map(self, max_tokens: int = 1024) -> str:
+    def generate_map(self, max_tokens: int = 4096) -> str:
         lines = ["<codebase_summary>"]
         for fpath in sorted(self._index.keys()):
             fi = self._index[fpath]
@@ -236,7 +236,7 @@ app = FastAPI(title="RecurseForge Repo-Map Server")
 # ---------------------------------------------------------------------------
 
 @app.get("/map")
-def get_repo_map(max_tokens: int = 1024):
+def get_repo_map(max_tokens: int = 4096):
     """Return the full repository map as XML-packed text."""
     if _REPO_MAP_INSTANCE is None:
         raise HTTPException(500, "RepoMap not initialized")
@@ -278,7 +278,7 @@ def health():
 # Startup / CLI
 # ---------------------------------------------------------------------------
 
-def create_app(target_dir: str, max_tokens: int = 1024) -> FastAPI:
+def create_app(target_dir: str, max_tokens: int = 4096) -> FastAPI:
     """Create and configure the FastAPI app with a RepoMap instance."""
     global _REPO_MAP_INSTANCE
     _REPO_MAP_INSTANCE = RepoMap(target_dir)
@@ -294,7 +294,7 @@ def main():
     parser.add_argument("--port", type=int, default=8001,
                         help="Port to listen on (default: 8001)")
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--max-tokens", type=int, default=1024)
+    parser.add_argument("--max-tokens", type=int, default=4096)
     args = parser.parse_args()
 
     logging.basicConfig(
