@@ -11,6 +11,8 @@ Models:
     NodeFrame         -- a single sub-agent's task + result
     ContextRequest    -- sub-agent asking the repo-map for code
     ContextPayload    -- repo-map server's reply
+    ContextBudget     -- hard input/output/safety token limits
+    ContextBudgetReport -- per-call context preflight telemetry
     ExecutionResult   -- sandbox output after running agent code
     Mutation          -- a single fix suggestion inside a TextGradient
     TextGradient      -- structured critique from TextGrad
@@ -27,7 +29,7 @@ import uuid
 from typing import Any, Optional
 
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +112,47 @@ class ContextPayload(VersionedModel):
     file_path: str
     content: str
     token_count: int
+
+
+class ContextBudget(VersionedModel):
+    """Hard token limits applied before an LLM request is sent."""
+    context_window: int = Field(gt=0)
+    max_prompt_tokens: int = Field(gt=0)
+    reserved_output_tokens: int = Field(ge=0)
+    safety_buffer_tokens: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_total_budget(self) -> "ContextBudget":
+        total = (
+            self.max_prompt_tokens
+            + self.reserved_output_tokens
+            + self.safety_buffer_tokens
+        )
+        if total > self.context_window:
+            raise ValueError(
+                "Context budget exceeds context window: "
+                "{} prompt + {} output + {} safety = {} > {}".format(
+                    self.max_prompt_tokens,
+                    self.reserved_output_tokens,
+                    self.safety_buffer_tokens,
+                    total,
+                    self.context_window,
+                )
+            )
+        return self
+
+
+class ContextBudgetReport(VersionedModel):
+    """Serializable preflight result for one LLM call."""
+    call_kind: str
+    estimated_prompt_tokens: int = Field(ge=0)
+    reserved_output_tokens: int = Field(ge=0)
+    safety_buffer_tokens: int = Field(ge=0)
+    effective_context_window: int = Field(gt=0)
+    max_prompt_tokens: int = Field(gt=0)
+    remaining_prompt_tokens: int
+    within_budget: bool
+    estimator_name: str = "utf8_bytes_per_3_conservative"
 
 
 class ExecutionResult(VersionedModel):

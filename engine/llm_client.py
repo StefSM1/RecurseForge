@@ -6,7 +6,11 @@ Both graph.py and redel.py use this to talk to the model.
 """
 
 import logging
+from typing import Any
+
 from openai import OpenAI
+
+from engine.context_governor import preflight_messages
 
 logger = logging.getLogger("recurseforge.engine.llm_client")
 
@@ -25,6 +29,8 @@ def chat_completion(
     max_tokens: int = 8192,
     temperature: float = 0.3,
     no_think: bool = False,
+    call_kind: str = "unspecified",
+    context_config: dict[str, Any] | None = None,
 ) -> str:
     """
     Send a chat completion request and return the assistant's text response.
@@ -44,6 +50,13 @@ def chat_completion(
     Returns:
         The assistant's response text, stripped.
     """
+    preflight_messages(
+        messages=messages,
+        max_tokens=max_tokens,
+        call_kind=call_kind,
+        config=context_config,
+    )
+
     kwargs = dict(
         model=model,
         messages=messages,
@@ -61,6 +74,14 @@ def chat_completion(
     # Primary: content field
     content = (msg.content or "").strip()
 
+    if choice.finish_reason == "length":
+        logger.warning(
+            "[LLM] Response for call=%s was truncated at max_tokens=%d "
+            "(partial content: %d chars). The context window and generation "
+            "limit are separate budgets.",
+            call_kind, max_tokens, len(content),
+        )
+
     # Qwen 3.5 thinking mode: model may put reasoning in reasoning_content
     # and leave content empty if max_tokens was consumed by reasoning.
     if not content:
@@ -74,12 +95,5 @@ def chat_completion(
             )
             # Return reasoning as fallback so we don't lose the output entirely
             return reasoning.strip()
-
-        if choice.finish_reason == "length":
-            logger.warning(
-                "[LLM] Response truncated at max_tokens=%d. "
-                "Content is empty. Consider increasing max_tokens.",
-                max_tokens,
-            )
 
     return content

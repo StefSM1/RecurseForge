@@ -16,6 +16,16 @@ llm:
   # Lower = more deterministic, higher = more creative
   temperature: 0.3
 
+context_governor:
+  # Phase 1: measure every prompt and reject it before inference if the
+  # configured prompt, output, and safety budgets cannot fit together.
+  enabled: true
+  context_window: 65536
+  # This is a hard ceiling, not a target. Ordinary prompts should be smaller.
+  max_prompt_tokens: 49152
+  reserved_output_tokens: 8192
+  safety_buffer_tokens: 8192
+
 recursion:
   # Maximum depth of recursive sub-agent spawning.
   # Depth 0 = root agent only. Depth 3 = root + 3 levels of children.

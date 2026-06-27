@@ -34,7 +34,9 @@ from typing import Any, Callable
 
 from openai import OpenAI
 
+from engine.context_governor import ContextGovernorError
 from engine.interfaces import Mutation, TextGradient
+from engine.llm_client import chat_completion
 
 logger = logging.getLogger("recurseforge.engine.textgrad")
 
@@ -175,6 +177,7 @@ class TextLoss:
         eval_prompt: str = CODE_EVAL_PROMPT,
         max_tokens: int = 1024,
         temperature: float = 0.1,
+        context_config: dict[str, Any] | None = None,
     ):
         """
         Args:
@@ -189,6 +192,7 @@ class TextLoss:
         self.eval_prompt = eval_prompt
         self.max_tokens = max_tokens
         self.temperature = temperature
+        self.context_config = context_config
 
     def __call__(
         self,
@@ -231,7 +235,8 @@ class TextLoss:
                     variable.role_description[:30])
 
         try:
-            response = self.client.chat.completions.create(
+            critique = chat_completion(
+                client=self.client,
                 model=self.model,
                 messages=[
                     {"role": "system", "content": "You are a precise code reviewer. "
@@ -240,8 +245,11 @@ class TextLoss:
                 ],
                 max_tokens=self.max_tokens,
                 temperature=self.temperature,
+                call_kind="textgrad_evaluate",
+                context_config=self.context_config,
             )
-            critique = (response.choices[0].message.content or "").strip()
+        except ContextGovernorError:
+            raise
         except Exception as e:
             logger.error("[TextGrad] Evaluation LLM call failed: %s", e)
             critique = "EVALUATION FAILED: {}".format(e)
@@ -348,6 +356,7 @@ class TGD:
         parameters: list[TextVariable],
         max_tokens: int = 2048,
         temperature: float = 0.2,
+        context_config: dict[str, Any] | None = None,
     ):
         """
         Args:
@@ -362,6 +371,7 @@ class TGD:
         self.parameters = parameters
         self.max_tokens = max_tokens
         self.temperature = temperature
+        self.context_config = context_config
 
     def step(self) -> dict[str, str]:
         """
@@ -419,7 +429,8 @@ class TGD:
         )
 
         try:
-            response = self.client.chat.completions.create(
+            result = chat_completion(
+                client=self.client,
                 model=self.model,
                 messages=[
                     {"role": "system", "content": "You are a code improvement agent. "
@@ -428,13 +439,16 @@ class TGD:
                 ],
                 max_tokens=self.max_tokens,
                 temperature=self.temperature,
+                call_kind="textgrad_update",
+                context_config=self.context_config,
             )
-            result = (response.choices[0].message.content or "").strip()
 
             # Extract code block if present
             code = _extract_code(result)
             return code if code else result
 
+        except ContextGovernorError:
+            raise
         except Exception as e:
             logger.error("[TextGrad] Update LLM call failed: %s", e)
             return variable.value
@@ -484,6 +498,7 @@ def gradient_fix(
     update_temperature: float = 0.2,
     max_tokens: int = 2048,
     progress_callback: Callable[[str, dict[str, Any]], None] | None = None,
+    context_config: dict[str, Any] | None = None,
 ) -> tuple[str, list[dict]]:
     """
     One-shot gradient fix: evaluate code, compute gradient, apply it.
@@ -518,6 +533,7 @@ def gradient_fix(
         eval_prompt=CODE_EVAL_PROMPT,
         max_tokens=max_tokens,
         temperature=eval_temperature,
+        context_config=context_config,
     )
 
     optimizer = TGD(
@@ -526,6 +542,7 @@ def gradient_fix(
         parameters=[code_var],
         max_tokens=max_tokens,
         temperature=update_temperature,
+        context_config=context_config,
     )
 
     gradient_log = []

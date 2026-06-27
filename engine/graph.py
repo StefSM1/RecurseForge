@@ -23,6 +23,7 @@ from typing import TypedDict
 from langgraph.graph import StateGraph, START, END
 
 from engine import redel
+from engine.context_governor import validate_context_config
 from engine.llm_client import get_client, chat_completion
 from engine.interfaces import EngineEvent, EventType
 from harness.event_bus import get_event_bus
@@ -173,6 +174,8 @@ def plan_node(state: RecursionState) -> dict:
             max_tokens=llm_cfg["max_tokens"],
             temperature=llm_cfg["temperature"],
             no_think=True,  # Planning step: disable thinking, we just need JSON
+            call_kind="root_plan",
+            context_config=config,
         )
     except Exception as exc:
         logger.error("[PLAN] LLM call failed: %s", exc)
@@ -259,6 +262,7 @@ def plan_node(state: RecursionState) -> dict:
                         eval_temperature=tg_cfg.get("eval_temperature", 0.1),
                         update_temperature=tg_cfg.get("update_temperature", 0.2),
                         max_tokens=llm_cfg["max_tokens"],
+                        context_config=config,
                         progress_callback=lambda phase, details: _emit(
                             EventType.CORRECTION_PROGRESS, run_id, {
                                 "correction_id": correction_id,
@@ -320,6 +324,8 @@ def plan_node(state: RecursionState) -> dict:
                                 exec_result.stderr or str(exec_result.exit_code)),
                             max_tokens=llm_cfg["max_tokens"],
                             temperature=llm_cfg["temperature"],
+                            call_kind="direct_retry",
+                            context_config=config,
                         )
                         retry_code = redel.extract_python_code(retry_response)
                         if not retry_code:
@@ -410,6 +416,8 @@ def execute_node(state: RecursionState) -> dict:
                 messages=messages,
                 max_tokens=llm_cfg["max_tokens"],
                 temperature=llm_cfg["temperature"],
+                call_kind="child_execute",
+                context_config=config,
             )
         except Exception as e:
             error_text = str(e)
@@ -503,6 +511,7 @@ def execute_node(state: RecursionState) -> dict:
                                     eval_temperature=tg_cfg.get("eval_temperature", 0.1),
                                     update_temperature=tg_cfg.get("update_temperature", 0.2),
                                     max_tokens=llm_cfg["max_tokens"],
+                                    context_config=config,
                                     progress_callback=lambda phase, details, cid=correction_id: _emit(
                                         EventType.CORRECTION_PROGRESS, run_id, {
                                             "correction_id": cid,
@@ -562,6 +571,8 @@ def execute_node(state: RecursionState) -> dict:
                                         messages=retry_messages,
                                         max_tokens=llm_cfg["max_tokens"],
                                         temperature=llm_cfg["temperature"],
+                                        call_kind="child_retry",
+                                        context_config=config,
                                     )
                                     new_code = redel.extract_python_code(llm_response)
                                     if new_code:
@@ -611,6 +622,8 @@ def execute_node(state: RecursionState) -> dict:
                                     messages=retry_messages,
                                     max_tokens=llm_cfg["max_tokens"],
                                     temperature=llm_cfg["temperature"],
+                                    call_kind="child_retry",
+                                    context_config=config,
                                 )
                                 new_code = redel.extract_python_code(llm_response)
                                 if new_code:
@@ -746,6 +759,7 @@ def build_graph(config: dict):
     Returns:
         A compiled LangGraph graph ready for .invoke().
     """
+    validate_context_config(config)
     graph = StateGraph(RecursionState)
 
     # Register nodes

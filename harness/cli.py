@@ -36,6 +36,11 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from engine.graph import build_graph
+from engine.context_governor import (
+    extract_server_context_window,
+    get_context_budget,
+    context_governor_enabled,
+)
 from harness.event_bus import get_event_bus
 from harness.vram_monitor import VRAMMonitor
 
@@ -110,6 +115,46 @@ def format_result(result: dict) -> str:
     return "\n".join(lines)
 
 
+def log_context_diagnostics(config: dict, logger: logging.Logger) -> None:
+    """Log application budgets and best-effort llama.cpp context metadata."""
+    if not context_governor_enabled(config):
+        logger.warning("Context governor is disabled")
+        return
+
+    budget = get_context_budget(config, config.get("llm", {}).get("max_tokens"))
+    logger.info(
+        "Context budget: prompt ceiling=%d, output reserve=%d, safety=%d, "
+        "effective window=%d",
+        budget.max_prompt_tokens,
+        budget.reserved_output_tokens,
+        budget.safety_buffer_tokens,
+        budget.context_window,
+    )
+
+    base_url = str(config.get("llm", {}).get("base_url", "")).rstrip("/")
+    if base_url.endswith("/v1"):
+        base_url = base_url[:-3]
+    if not base_url:
+        return
+    try:
+        import httpx
+        response = httpx.get(base_url + "/props", timeout=2.0)
+        response.raise_for_status()
+        server_window = extract_server_context_window(response.json())
+        if server_window is None:
+            logger.debug("llama.cpp /props did not expose a recognized context size")
+        elif server_window != budget.context_window:
+            logger.warning(
+                "Context mismatch: llama.cpp reports %d tokens, application "
+                "budget expects %d",
+                server_window, budget.context_window,
+            )
+        else:
+            logger.info("llama.cpp context confirmed: %d tokens", server_window)
+    except Exception as exc:
+        logger.debug("Could not inspect llama.cpp /props: %s", exc)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="RecurseForge -- Recursive LLM Agent Framework",
@@ -145,6 +190,7 @@ def main():
     logger.info("LLM context window target: %s tokens; output budget: %s tokens",
                 config["llm"].get("context_window", "server-default"),
                 config["llm"].get("max_tokens", "server-default"))
+    log_context_diagnostics(config, logger)
     logger.info("Recursion: max_depth=%d, max_children=%d",
                 config["recursion"]["max_depth"],
                 config["recursion"]["max_children"])
