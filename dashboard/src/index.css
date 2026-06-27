@@ -148,3 +148,166 @@ html, body, #root {
   }
 
 }
+
+/* Execution evidence uses inset inspection wells, distinct from panel black. */
+.rf-result-card {
+  max-height: 55vh;
+  overflow: auto;
+  padding: 12px 13px;
+  border: 1px solid color-mix(in oklab, var(--color-accent-blue) 26%, var(--color-border));
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--color-panel-light) 58%, var(--color-surface));
+  box-shadow:
+    inset 3px 0 0 color-mix(in oklab, var(--color-accent-blue) 55%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.025);
+  scrollbar-color: var(--color-border) transparent;
+}
+
+.rf-result-card:focus-visible {
+  outline: 1px solid var(--color-accent-blue);
+  outline-offset: 2px;
+}
+
+.rf-markdown {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: inherit;
+  line-height: 1.65;
+}
+
+.rf-markdown > :first-child { margin-top: 0; }
+.rf-markdown > :last-child { margin-bottom: 0; }
+
+.rf-markdown h1 {
+  margin: 1.1em 0 0.55em;
+  color: var(--color-text-primary);
+  font-size: 1.2rem;
+  font-weight: 700;
+  letter-spacing: -0.018em;
+}
+
+.rf-markdown h2 {
+  margin: 1.05em 0 0.5em;
+  padding-bottom: 0.3em;
+  border-bottom: 1px solid var(--color-border);
+  color: var(--color-text-primary);
+  font-size: 1rem;
+  font-weight: 650;
+}
+
+.rf-markdown h3 {
+  margin: 1em 0 0.45em;
+  color: var(--color-text-primary);
+  font-size: 0.9rem;
+  font-weight: 650;
+}
+
+.rf-markdown p,
+.rf-markdown ul,
+.rf-markdown ol,
+.rf-markdown blockquote,
+.rf-markdown table {
+  margin: 0.55em 0;
+}
+
+.rf-markdown ul,
+.rf-markdown ol {
+  padding-left: 1.35rem;
+}
+
+.rf-markdown ul { list-style: disc; }
+.rf-markdown ol { list-style: decimal; }
+.rf-markdown li + li { margin-top: 0.22em; }
+
+.rf-markdown :not(pre) > code {
+  border: 1px solid color-mix(in oklab, var(--color-accent-purple) 24%, var(--color-border));
+  border-radius: 4px;
+  background: color-mix(in oklab, var(--color-accent-purple) 8%, var(--color-surface));
+  padding: 0.08em 0.35em;
+  color: color-mix(in oklab, var(--color-text-primary) 86%, var(--color-accent-purple));
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+}
+
+.rf-markdown pre {
+  max-width: 100%;
+  overflow: auto;
+  margin: 0.8em 0;
+  padding: 12px;
+  border: 1px solid color-mix(in oklab, var(--color-accent-green) 22%, var(--color-border));
+  border-radius: 7px;
+  background: oklch(0.105 0.012 260);
+  box-shadow: inset 0 1px 8px rgba(0, 0, 0, 0.28);
+}
+
+.rf-markdown pre code {
+  display: block;
+  min-width: max-content;
+  color: color-mix(in oklab, var(--color-text-primary) 82%, var(--color-accent-green));
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  line-height: 1.6;
+  white-space: pre;
+}
+
+.rf-markdown blockquote {
+  border-left: 2px solid var(--color-accent-purple);
+  padding-left: 0.8rem;
+  color: var(--color-text-secondary);
+}
+
+.rf-markdown a {
+  color: var(--color-accent-blue);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.rf-markdown table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+
+.rf-markdown th,
+.rf-markdown td {
+  border: 1px solid var(--color-border);
+  padding: 0.35rem 0.5rem;
+  text-align: left;
+}
+
+.rf-chat-pane {
+  position: relative;
+  display: flex;
+  flex: 0 0 auto;
+  min-width: 280px;
+  height: 100%;
+  border-left: 1px solid var(--color-border);
+  background: var(--color-panel);
+}
+
+.rf-chat-resizer {
+  position: relative;
+  z-index: 20;
+  width: 7px;
+  margin-left: -4px;
+  flex: 0 0 7px;
+  cursor: col-resize;
+  touch-action: none;
+  outline: none;
+}
+
+.rf-chat-resizer::after {
+  content: '';
+  position: absolute;
+  inset: 0 3px;
+  background: var(--color-border);
+  transition: background-color 140ms ease, box-shadow 140ms ease;
+}
+
+.rf-chat-resizer:hover::after,
+.rf-chat-resizer:focus-visible::after,
+.rf-chat-resizer--active::after {
+  background: var(--color-accent-blue);
+  box-shadow: 0 0 8px color-mix(in oklab, var(--color-accent-blue) 48%, transparent);
+}

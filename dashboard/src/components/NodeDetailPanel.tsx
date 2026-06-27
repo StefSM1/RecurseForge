@@ -2,6 +2,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import type { GraphEntity } from '../types/events'
 import type { CorrectionRun, SandboxRun } from '../types/events'
 import { buildRetryCycles } from './executionState'
+import MarkdownContent from './MarkdownContent'
 
 interface NodeDetailPanelProps {
   entity: GraphEntity | null
@@ -32,6 +33,22 @@ function Preview({ label, value }: { label: string; value?: string }) {
         {value.slice(0, 2000)}{value.length > 2000 ? '...' : ''}
       </pre>
     </div>
+  )
+}
+
+function ResultPreview({ label, value }: { label: string; value?: string }) {
+  if (!value) return null
+  return (
+    <section className="mb-4">
+      <span className="text-xs text-text-secondary">{label}</span>
+      <div
+        className="rf-result-card mt-1"
+        tabIndex={0}
+        aria-label={`${label} content`}
+      >
+        <MarkdownContent content={value} />
+      </div>
+    </section>
   )
 }
 
@@ -81,6 +98,7 @@ export default function NodeDetailPanel({
                 <Field label="Node ID" value="root" mono />
                 <Field label="Status" value={entity.value.status} />
                 <Field label="Task" value={entity.value.task || 'Waiting for task...'} />
+                <ResultPreview label="Result" value={entity.value.result} />
               </>
             )}
 
@@ -94,7 +112,7 @@ export default function NodeDetailPanel({
                   <Field label="Duration" value={`${((entity.value.completeTime - entity.value.spawnTime) / 1000).toFixed(1)}s`} />
                 )}
                 {entity.value.attempts !== undefined && <Field label="Attempts" value={entity.value.attempts} mono />}
-                <Preview label="Result" value={entity.value.result} />
+                <ResultPreview label="Result" value={entity.value.result} />
               </>
             )}
 

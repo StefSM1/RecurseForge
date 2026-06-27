@@ -4,6 +4,8 @@ import ChatInterface from './components/ChatInterface'
 import NodeDetailPanel from './components/NodeDetailPanel'
 import ResourceMonitor from './components/ResourceMonitor'
 import SummaryBar from './components/SummaryBar'
+import MarkdownContent from './components/MarkdownContent'
+import ResizableChatPane from './components/ResizableChatPane'
 import { useWebSocket } from './hooks/useWebSocket'
 import { BACKEND_BASE_URL } from './config'
 import type { GraphEntity } from './types/events'
@@ -74,6 +76,7 @@ function App() {
         value: {
           id: 'root', task: rootTask,
           status: retryingOwners.has('root') ? 'retrying' : rootStatus,
+          result: run?.result,
         },
       }
     }
@@ -92,7 +95,7 @@ function App() {
     return value ? { kind: 'correction', value } : null
   }, [
     selection, nodes, sandboxRuns, corrections, rootTask, rootStatus,
-    retryingOwners,
+    retryingOwners, run,
   ])
 
   const handleNodeClick = useCallback((nodeId: string) => {
@@ -250,16 +253,17 @@ function App() {
                     </div>
                     <div>
                       <span className="text-xs text-text-secondary">Summary</span>
-                      <p className="text-sm text-text-primary">{outputSummary || 'No output yet'}</p>
+                      <MarkdownContent
+                        content={run?.result || outputSummary || 'No output yet'}
+                        className="mt-1 text-sm text-text-primary"
+                      />
                     </div>
                     {Array.from(nodes.values()).filter(n => n.result).map(n => (
                       <div key={n.id}>
                         <span className="text-xs text-text-secondary">Node {n.id}</span>
-                        <pre className="text-xs text-text-primary bg-surface rounded p-2 mt-1
-                                       overflow-x-auto whitespace-pre-wrap font-mono">
-                          {n.result?.slice(0, 500)}
-                          {(n.result?.length ?? 0) > 500 ? '...' : ''}
-                        </pre>
+                        <div className="rf-result-card mt-1" tabIndex={0}>
+                          <MarkdownContent content={n.result ?? ''} />
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -281,7 +285,9 @@ function App() {
         />
       </main>
 
-      <ChatInterface nodes={nodes} events={events} />
+      <ResizableChatPane>
+        <ChatInterface nodes={nodes} events={events} />
+      </ResizableChatPane>
     </div>
   )
 }

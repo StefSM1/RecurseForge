@@ -93,6 +93,28 @@ describe('dashboard execution reducer', () => {
     expect(state.nodes.get('agent-a')?.runId).toBe('run-1')
   })
 
+  it('keeps complete root and agent results instead of their summaries', () => {
+    let state = reduceEngineEvent(createDashboardDataState(), event(
+      'run_started', { task: 'Build it', mode: 'delegated' }, 1,
+    ))
+    state = reduceEngineEvent(state, event('node_spawn', {
+      node_id: 'agent-a', parent_id: 'root', task: 'Write code',
+    }, 2))
+    state = reduceEngineEvent(state, event('node_complete', {
+      node_id: 'agent-a', result_summary: 'short',
+      result: '# Full result\n\n```python\nprint("complete")\n```',
+      token_usage: 20, code_executed: true, sandbox_exit_code: 0,
+      attempts: 1, success: true,
+    }, 3))
+    state = reduceEngineEvent(state, event('run_completed', {
+      success: true, mode: 'direct', result_summary: 'root short',
+      result: '# Complete root result',
+    }, 4))
+
+    expect(state.nodes.get('agent-a')?.result).toContain('print("complete")')
+    expect(state.run?.result).toBe('# Complete root result')
+  })
+
   it('does not overwrite agent status when legacy gradient telemetry arrives', () => {
     let state = reduceEngineEvent(createDashboardDataState(), event('node_spawn', {
       node_id: 'agent-a', parent_id: 'root', task: 'A',

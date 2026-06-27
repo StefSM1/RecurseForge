@@ -22,6 +22,7 @@ export interface RunCompletedPayload {
   success: boolean
   mode: 'direct' | 'delegated'
   result_summary?: string
+  result?: string
 }
 
 export interface NodeSpawnPayload {
@@ -33,6 +34,7 @@ export interface NodeSpawnPayload {
 export interface NodeCompletePayload {
   node_id: string
   result_summary: string
+  result?: string
   token_usage: number
   code_executed: boolean
   sandbox_exit_code: number | null
@@ -196,12 +198,14 @@ export interface RunState {
   startTime: number
   completeTime?: number
   resultSummary?: string
+  result?: string
 }
 
 export interface RootAgentView {
   id: 'root'
   task: string
   status: 'offline' | 'running' | 'retrying' | 'success' | 'error'
+  result?: string
 }
 
 export type GraphEntity =

@@ -93,6 +93,7 @@ export function reduceEngineEvent(
         startTime: run?.startTime ?? timestamp,
         completeTime: timestamp,
         resultSummary: payload.result_summary,
+        result: payload.result,
       }
       break
     }
@@ -118,7 +119,7 @@ export function reduceEngineEvent(
           ...existing,
           status: success ? 'success' : 'failed',
           codeExecuted: payload.code_executed,
-          result: payload.result_summary,
+          result: payload.result ?? payload.result_summary,
           exitCode: payload.sandbox_exit_code,
           attempts: payload.attempts,
           completeTime: timestamp,

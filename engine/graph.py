@@ -184,6 +184,7 @@ def plan_node(state: RecursionState) -> dict:
             "success": False,
             "mode": "direct",
             "result_summary": message[:200],
+            "result": message,
         })
         return {"status": "done", "direct_answer": message}
 
@@ -364,6 +365,7 @@ def plan_node(state: RecursionState) -> dict:
         "success": direct_success,
         "mode": "direct",
         "result_summary": answer[:200],
+        "result": answer,
     })
     return {"status": "done", "direct_answer": answer}
 
@@ -434,6 +436,7 @@ def execute_node(state: RecursionState) -> dict:
             _emit(EventType.NODE_COMPLETE, run_id, {
                 "node_id": child["node_id"],
                 "result_summary": error_text[:200],
+                "result": error_text,
                 "token_usage": 0,
                 "code_executed": False,
                 "sandbox_exit_code": None,
@@ -681,6 +684,7 @@ def execute_node(state: RecursionState) -> dict:
         completion_payload = {
             "node_id": child["node_id"],
             "result_summary": llm_response[:200],
+            "result": llm_response,
             "token_usage": len(llm_response.split()),
             "code_executed": code is not None,
             "sandbox_exit_code": exec_result.exit_code if exec_result else None,

@@ -166,6 +166,8 @@ class BackendTelemetryTests(unittest.TestCase):
         self.assertEqual([event.event_type for event in events], [
             "run_started", "sandbox_started", "sandbox_completed", "run_completed"])
         self.assertEqual(len({event.run_id for event in events}), 1)
+        self.assertEqual(events[-1].payload["result"],
+                         result["direct_answer"])
 
     def test_graph_initialization_creates_unique_run_ids(self):
         first = graph.init_node(state(config()))["run_id"]
@@ -207,7 +209,10 @@ class BackendTelemetryTests(unittest.TestCase):
     def test_text_only_child_bypasses_sandbox(self):
         result = self.run_child("A plain-language answer.")
         self.assertTrue(result["results"][0]["success"])
-        self.assertEqual(self.event_types(), ["node_complete"])
+        events = self.events()
+        self.assertEqual([event.event_type for event in events], ["node_complete"])
+        event = events[0]
+        self.assertEqual(event.payload["result"], "A plain-language answer.")
 
     def test_engine_events_have_identity_run_and_engine_timestamp(self):
         self.run_child("A plain-language answer.")

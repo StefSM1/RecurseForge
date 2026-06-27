@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import type { AgentNode, EngineEvent } from '../types/events'
 import { useChatRuns } from '../hooks/useChatRuns'
 import { buildChatTabs, shouldSubmitChatInput } from './chatModel'
+import MarkdownContent from './MarkdownContent'
 
 interface ChatInterfaceProps {
   nodes: Map<string, AgentNode>
@@ -38,7 +39,7 @@ export default function ChatInterface({ nodes, events }: ChatInterfaceProps) {
   }
 
   return (
-    <aside className="w-80 bg-panel border-l border-border flex flex-col min-w-0">
+    <aside className="w-full h-full bg-panel flex flex-col min-w-0">
       <div className="border-b border-border">
         <div className="px-3 pt-3">
           <h2 className="text-sm font-medium text-text-primary">Chat</h2>
@@ -116,15 +117,16 @@ export default function ChatInterface({ nodes, events }: ChatInterfaceProps) {
                       </span>
                     )}
                   </div>
-                  <pre className={`text-xs whitespace-pre-wrap font-sans leading-relaxed ${
+                  <MarkdownContent
+                    content={message.content}
+                    className={`text-xs leading-relaxed ${
                     message.role === 'assistant' && message.status === 'success'
                       ? 'text-text-primary'
                       : message.role === 'assistant'
                         ? 'text-text-secondary'
                         : 'text-text-primary'
-                  }`}>
-                    {message.content}
-                  </pre>
+                    }`}
+                  />
                 </div>
               ))
             )}
