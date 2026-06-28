@@ -7,7 +7,12 @@ import logging
 import math
 from typing import Any
 
-from engine.interfaces import ContextBudget, ContextBudgetReport
+from engine.interfaces import (
+    ContextBudget,
+    ContextBudgetReport,
+    ContextBundle,
+    ContextSection,
+)
 
 logger = logging.getLogger("recurseforge.engine.context_governor")
 
@@ -174,6 +179,108 @@ def preflight_messages(
     if not within_budget:
         raise ContextBudgetError(report)
     return report
+
+
+def _truncate_text(text: str, max_tokens: int, strategy: str) -> str:
+    """Deterministically fit text to an estimated token allowance."""
+    if count_text_tokens(text) <= max_tokens:
+        return text
+    if strategy == "none":
+        return text
+
+    marker = "\n...[context trimmed]...\n"
+    target_bytes = max_tokens * 3
+    marker_bytes = len(marker.encode("utf-8"))
+    available = max(0, target_bytes - marker_bytes)
+
+    def decode_prefix(raw: bytes) -> str:
+        return raw.decode("utf-8", errors="ignore")
+
+    raw = text.encode("utf-8")
+    if strategy == "head_tail":
+        head_size = available // 2
+        tail_size = available - head_size
+        head = decode_prefix(raw[:head_size])
+        tail = raw[-tail_size:].decode("utf-8", errors="ignore") if tail_size else ""
+        return head + marker + tail
+    if strategy == "tail":
+        tail = raw[-available:].decode("utf-8", errors="ignore") if available else ""
+        return marker + tail
+    return decode_prefix(raw[:available]) + marker
+
+
+def _section_limit(section: ContextSection, config: dict[str, Any]) -> int | None:
+    if section.max_tokens is not None:
+        return section.max_tokens
+    limits = config.get("context_governor", {}).get("sections", {})
+    configured = limits.get(section.name, limits.get(section.name + "_tokens"))
+    return int(configured) if configured is not None else None
+
+
+def _prepare_sections(
+    sections: list[ContextSection],
+    config: dict[str, Any],
+) -> list[ContextSection]:
+    prepared = []
+    for section in sections:
+        limit = _section_limit(section, config)
+        content = section.content
+        if limit is not None:
+            content = _truncate_text(content, limit, section.trim_strategy)
+        prepared.append(section.model_copy(update={"content": content}))
+    return prepared
+
+
+def _messages_for_sections(sections: list[ContextSection]) -> list[dict[str, str]]:
+    return [
+        {"role": section.role, "content": section.content}
+        for section in sections
+        if section.content
+    ]
+
+
+def build_context_bundle(
+    call_kind: str,
+    sections: list[ContextSection],
+    max_tokens: int,
+    config: dict[str, Any],
+) -> ContextBundle:
+    """Assemble a prompt by capping sections, then omitting optional ones."""
+    prepared = _prepare_sections(sections, config)
+    included = list(prepared)
+    omitted: list[str] = []
+    budget = get_context_budget(config, max_tokens)
+
+    optional_by_drop_order = sorted(
+        (section for section in prepared if not section.required),
+        key=lambda section: (section.priority, -prepared.index(section)),
+    )
+    while estimate_message_tokens(_messages_for_sections(included)) > budget.max_prompt_tokens:
+        if not optional_by_drop_order:
+            break
+        dropped = optional_by_drop_order.pop(0)
+        included.remove(dropped)
+        omitted.append(dropped.name)
+
+    messages = _messages_for_sections(included)
+    report = preflight_messages(messages, max_tokens, call_kind, config)
+    counts = {
+        section.name: count_text_tokens(section.content)
+        for section in prepared
+    }
+    logger.info(
+        "[CONTEXT] call=%s included=%s omitted=%s",
+        call_kind,
+        ",".join(section.name for section in included) or "none",
+        ",".join(omitted) or "none",
+    )
+    return ContextBundle(
+        messages=messages,
+        included_sections=[section.name for section in included],
+        omitted_sections=omitted,
+        section_token_counts=counts,
+        budget_report=report,
+    )
 
 
 def extract_server_context_window(props: dict[str, Any]) -> int | None:

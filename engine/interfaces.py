@@ -13,6 +13,8 @@ Models:
     ContextPayload    -- repo-map server's reply
     ContextBudget     -- hard input/output/safety token limits
     ContextBudgetReport -- per-call context preflight telemetry
+    ContextSection     -- one named, prioritized prompt contribution
+    ContextBundle      -- assembled messages plus inclusion telemetry
     ExecutionResult   -- sandbox output after running agent code
     Mutation          -- a single fix suggestion inside a TextGradient
     TextGradient      -- structured critique from TextGrad
@@ -153,6 +155,26 @@ class ContextBudgetReport(VersionedModel):
     remaining_prompt_tokens: int
     within_budget: bool
     estimator_name: str = "utf8_bytes_per_3_conservative"
+
+
+class ContextSection(VersionedModel):
+    """A named prompt contribution with deterministic retention rules."""
+    name: str
+    role: str
+    content: str
+    required: bool = False
+    priority: int = 0
+    trim_strategy: str = "none"
+    max_tokens: int | None = Field(default=None, gt=0)
+
+
+class ContextBundle(VersionedModel):
+    """The exact messages selected for an LLM call and why."""
+    messages: list[dict[str, Any]] = Field(default_factory=list)
+    included_sections: list[str] = Field(default_factory=list)
+    omitted_sections: list[str] = Field(default_factory=list)
+    section_token_counts: dict[str, int] = Field(default_factory=dict)
+    budget_report: ContextBudgetReport | None = None
 
 
 class ExecutionResult(VersionedModel):

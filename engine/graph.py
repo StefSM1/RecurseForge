@@ -161,6 +161,12 @@ def plan_node(state: RecursionState) -> dict:
         max_depth=rec_cfg["max_depth"],
         max_children=rec_cfg["max_children"],
     )
+    context_sections = redel.build_plan_sections(
+        task_description=state["task_description"],
+        depth=state["depth"],
+        max_depth=rec_cfg["max_depth"],
+        max_children=rec_cfg["max_children"],
+    )
 
     logger.info("[PLAN] Depth %d/%d -- Asking LLM to plan...",
                 state["depth"], rec_cfg["max_depth"])
@@ -176,6 +182,7 @@ def plan_node(state: RecursionState) -> dict:
             no_think=True,  # Planning step: disable thinking, we just need JSON
             call_kind="root_plan",
             context_config=config,
+            context_sections=context_sections,
         )
     except Exception as exc:
         logger.error("[PLAN] LLM call failed: %s", exc)
@@ -327,6 +334,9 @@ def plan_node(state: RecursionState) -> dict:
                             temperature=llm_cfg["temperature"],
                             call_kind="direct_retry",
                             context_config=config,
+                            context_sections=redel.build_retry_sections(
+                                state["task_description"], code,
+                                exec_result.stderr or str(exec_result.exit_code)),
                         )
                         retry_code = redel.extract_python_code(retry_response)
                         if not retry_code:
@@ -411,6 +421,8 @@ def execute_node(state: RecursionState) -> dict:
 
         # --- LLM call with repo-map context ---
         messages = redel.build_execute_messages(child["task"], repo_map=repo_map)
+        context_sections = redel.build_execute_sections(
+            child["task"], repo_map=repo_map)
         try:
             llm_response = chat_completion(
                 client=client,
@@ -420,6 +432,7 @@ def execute_node(state: RecursionState) -> dict:
                 temperature=llm_cfg["temperature"],
                 call_kind="child_execute",
                 context_config=config,
+                context_sections=context_sections,
             )
         except Exception as e:
             error_text = str(e)
@@ -576,6 +589,8 @@ def execute_node(state: RecursionState) -> dict:
                                         temperature=llm_cfg["temperature"],
                                         call_kind="child_retry",
                                         context_config=config,
+                                        context_sections=redel.build_retry_sections(
+                                            child["task"], code, error_msg),
                                     )
                                     new_code = redel.extract_python_code(llm_response)
                                     if new_code:
@@ -627,6 +642,8 @@ def execute_node(state: RecursionState) -> dict:
                                     temperature=llm_cfg["temperature"],
                                     call_kind="child_retry",
                                     context_config=config,
+                                    context_sections=redel.build_retry_sections(
+                                        child["task"], code, error_msg),
                                 )
                                 new_code = redel.extract_python_code(llm_response)
                                 if new_code:

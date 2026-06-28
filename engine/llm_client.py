@@ -10,7 +10,12 @@ from typing import Any
 
 from openai import OpenAI
 
-from engine.context_governor import preflight_messages
+from engine.context_governor import (
+    build_context_bundle,
+    context_governor_enabled,
+    preflight_messages,
+)
+from engine.interfaces import ContextSection
 
 logger = logging.getLogger("recurseforge.engine.llm_client")
 
@@ -31,6 +36,7 @@ def chat_completion(
     no_think: bool = False,
     call_kind: str = "unspecified",
     context_config: dict[str, Any] | None = None,
+    context_sections: list[ContextSection] | None = None,
 ) -> str:
     """
     Send a chat completion request and return the assistant's text response.
@@ -50,12 +56,30 @@ def chat_completion(
     Returns:
         The assistant's response text, stripped.
     """
-    preflight_messages(
-        messages=messages,
-        max_tokens=max_tokens,
-        call_kind=call_kind,
-        config=context_config,
-    )
+    if context_governor_enabled(context_config):
+        sections = context_sections or [
+            ContextSection(
+                name="legacy_message_{}".format(index),
+                role=message.get("role", "user"),
+                content=str(message.get("content", "")),
+                required=True,
+                priority=100,
+            )
+            for index, message in enumerate(messages)
+        ]
+        messages = build_context_bundle(
+            call_kind=call_kind,
+            sections=sections,
+            max_tokens=max_tokens,
+            config=context_config or {},
+        ).messages
+    else:
+        preflight_messages(
+            messages=messages,
+            max_tokens=max_tokens,
+            call_kind=call_kind,
+            config=context_config,
+        )
 
     kwargs = dict(
         model=model,

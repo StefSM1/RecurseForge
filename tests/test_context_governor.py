@@ -5,6 +5,7 @@ from unittest.mock import Mock, patch
 from pydantic import ValidationError
 
 from engine.context_governor import (
+    build_context_bundle,
     ContextBudgetError,
     ContextEstimationError,
     extract_server_context_window,
@@ -12,7 +13,7 @@ from engine.context_governor import (
     preflight_messages,
     validate_context_config,
 )
-from engine.interfaces import ContextBudget
+from engine.interfaces import ContextBudget, ContextSection
 from engine.llm_client import chat_completion
 from engine.textgrad import TextGradient, TextLoss, TextVariable, TGD
 
@@ -33,6 +34,62 @@ def config(**overrides):
 
 
 class ContextGovernorTests(unittest.TestCase):
+    def test_under_budget_bundle_keeps_all_sections(self):
+        sections = [
+            ContextSection(name="required", role="system", content="rules",
+                           required=True, priority=100),
+            ContextSection(name="optional", role="user", content="context",
+                           priority=10),
+        ]
+        bundle = build_context_bundle("root_plan", sections, 20, config())
+        self.assertEqual(bundle.included_sections, ["required", "optional"])
+        self.assertEqual(bundle.omitted_sections, [])
+
+    def test_lower_priority_optional_sections_are_removed_first(self):
+        cfg = config(max_prompt_tokens=35)
+        sections = [
+            ContextSection(name="required", role="system", content="rules",
+                           required=True, priority=100),
+            ContextSection(name="high", role="user", content="h" * 30,
+                           priority=50),
+            ContextSection(name="low", role="user", content="l" * 60,
+                           priority=10),
+        ]
+        bundle = build_context_bundle("child_execute", sections, 20, cfg)
+        self.assertEqual(bundle.omitted_sections[0], "low")
+        self.assertIn("required", bundle.included_sections)
+
+    def test_required_only_overflow_fails_clearly(self):
+        sections = [ContextSection(
+            name="current_task", role="user", content="x" * 300,
+            required=True, priority=100)]
+        with self.assertRaises(ContextBudgetError):
+            build_context_bundle("root_plan", sections, 20, config())
+
+    def test_traceback_cap_preserves_head_and_tail(self):
+        cfg = config()
+        cfg["context_governor"]["sections"] = {"sandbox_error_tokens": 20}
+        sections = [ContextSection(
+            name="sandbox_error", role="user",
+            content="TRACE_HEAD" + ("x" * 100) + "TRACE_TAIL",
+            required=True, priority=100, trim_strategy="head_tail")]
+        bundle = build_context_bundle("child_retry", sections, 20, cfg)
+        content = bundle.messages[0]["content"]
+        self.assertIn("TRACE_HEAD", content)
+        self.assertIn("TRACE_TAIL", content)
+        self.assertIn("context trimmed", content)
+
+    def test_bundle_assembly_is_deterministic(self):
+        sections = [
+            ContextSection(name="required", role="system", content="rules",
+                           required=True, priority=100),
+            ContextSection(name="optional", role="user", content="x" * 120,
+                           priority=1),
+        ]
+        first = build_context_bundle("root_plan", sections, 20, config())
+        second = build_context_bundle("root_plan", sections, 20, config())
+        self.assertEqual(first.model_dump(), second.model_dump())
+
     def test_budget_rejects_invalid_total(self):
         with self.assertRaises(ValidationError):
             ContextBudget(
@@ -117,6 +174,25 @@ class ContextGovernorTests(unittest.TestCase):
             )
         self.assertEqual(result, "partial")
         self.assertIn("generation limit", " ".join(logs.output))
+
+    def test_disabled_governor_preserves_legacy_messages(self):
+        choice = SimpleNamespace(
+            message=SimpleNamespace(content="ok"), finish_reason="stop")
+        client = Mock()
+        client.chat.completions.create.return_value = SimpleNamespace(
+            choices=[choice])
+        cfg = config(enabled=False)
+        legacy = [{"role": "user", "content": "legacy"}]
+        result = chat_completion(
+            client=client, model="fake", messages=legacy,
+            max_tokens=20, context_config=cfg,
+            context_sections=[ContextSection(
+                name="replacement", role="user", content="new",
+                required=True, priority=100)],
+        )
+        self.assertEqual(result, "ok")
+        self.assertEqual(
+            client.chat.completions.create.call_args.kwargs["messages"], legacy)
 
     @patch("engine.textgrad.chat_completion")
     def test_textgrad_evaluator_uses_governed_call_kind(self, completion):

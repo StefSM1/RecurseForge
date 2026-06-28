@@ -14,6 +14,8 @@ import json
 import re
 import uuid
 
+from engine.interfaces import ContextSection
+
 # ---------------------------------------------------------------------------
 # Prompt templates
 # ---------------------------------------------------------------------------
@@ -100,6 +102,24 @@ def build_plan_messages(
     ]
 
 
+def build_plan_sections(
+    task_description: str,
+    depth: int,
+    max_depth: int,
+    max_children: int,
+) -> list[ContextSection]:
+    messages = build_plan_messages(
+        task_description, depth, max_depth, max_children)
+    return [
+        ContextSection(
+            name="system_instructions", role="system",
+            content=messages[0]["content"], required=True, priority=100),
+        ContextSection(
+            name="current_task", role="user",
+            content=messages[1]["content"], required=True, priority=95),
+    ]
+
+
 def build_execute_messages(task: str, repo_map: str = "") -> list[dict]:
     """
     Build the message list for executing a single sub-task.
@@ -122,6 +142,24 @@ def build_execute_messages(task: str, repo_map: str = "") -> list[dict]:
     ]
 
 
+def build_execute_sections(task: str, repo_map: str = "") -> list[ContextSection]:
+    sections = [
+        ContextSection(
+            name="system_instructions", role="system",
+            content=EXECUTE_SYSTEM_PROMPT.format(repo_map_section=""),
+            required=True, priority=100),
+    ]
+    if repo_map:
+        sections.append(ContextSection(
+            name="repo_map", role="system",
+            content=REPO_MAP_TEMPLATE.format(repo_map=repo_map),
+            required=False, priority=30, trim_strategy="head"))
+    sections.append(ContextSection(
+        name="current_task", role="user", content=task,
+        required=True, priority=95))
+    return sections
+
+
 def build_retry_messages(original_task: str, previous_code: str,
                          error_output: str) -> list[dict]:
     """
@@ -142,6 +180,29 @@ def build_retry_messages(original_task: str, previous_code: str,
         {"role": "assistant", "content": previous_code},
         {"role": "user", "content": RETRY_PROMPT_TEMPLATE.format(
             error_output=error_output[:2000])},
+    ]
+
+
+def build_retry_sections(
+    original_task: str,
+    previous_code: str,
+    error_output: str,
+) -> list[ContextSection]:
+    return [
+        ContextSection(
+            name="system_instructions", role="system",
+            content=EXECUTE_SYSTEM_PROMPT.format(repo_map_section=""),
+            required=True, priority=100),
+        ContextSection(
+            name="current_task", role="user", content=original_task,
+            required=True, priority=95),
+        ContextSection(
+            name="previous_code", role="assistant", content=previous_code,
+            required=True, priority=90, trim_strategy="head"),
+        ContextSection(
+            name="sandbox_error", role="user",
+            content=RETRY_PROMPT_TEMPLATE.format(error_output=error_output),
+            required=True, priority=92, trim_strategy="head_tail"),
     ]
 
 

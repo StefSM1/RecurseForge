@@ -17,14 +17,20 @@ llm:
   temperature: 0.3
 
 context_governor:
-  # Phase 1: measure every prompt and reject it before inference if the
-  # configured prompt, output, and safety budgets cannot fit together.
+  # Measure every prompt, cap named sections, and omit low-priority optional
+  # context deterministically before inference.
   enabled: true
   context_window: 65536
   # This is a hard ceiling, not a target. Ordinary prompts should be smaller.
   max_prompt_tokens: 49152
   reserved_output_tokens: 8192
   safety_buffer_tokens: 8192
+  sections:
+    repo_map_tokens: 4096
+    code_snippet_tokens: 16384
+    parent_context_tokens: 4096
+    sibling_result_tokens: 4096
+    sandbox_error_tokens: 4096
 
 recursion:
   # Maximum depth of recursive sub-agent spawning.

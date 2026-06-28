@@ -35,7 +35,7 @@ from typing import Any, Callable
 from openai import OpenAI
 
 from engine.context_governor import ContextGovernorError
-from engine.interfaces import Mutation, TextGradient
+from engine.interfaces import ContextSection, Mutation, TextGradient
 from engine.llm_client import chat_completion
 
 logger = logging.getLogger("recurseforge.engine.textgrad")
@@ -235,6 +235,39 @@ class TextLoss:
                     variable.role_description[:30])
 
         try:
+            evaluation_sections = [
+                ContextSection(
+                    name="system_instructions", role="system",
+                    content="You are a precise code reviewer. Only output in the "
+                            "LINE/CAUSE/FIX format requested.",
+                    required=True, priority=100),
+                ContextSection(
+                    name="current_task", role="user",
+                    content="Role: {}\nOriginal task: {}".format(
+                        variable.role_description,
+                        ctx.get("task", "(not specified)")),
+                    required=True, priority=95),
+                ContextSection(
+                    name="previous_code", role="user",
+                    content="Code to evaluate:\n```python\n{}\n```".format(
+                        variable.value),
+                    required=True, priority=90, trim_strategy="head"),
+                ContextSection(
+                    name="sandbox_output", role="user",
+                    content="Execution stdout:\n{}".format(
+                        ctx.get("stdout", "(none)")),
+                    required=False, priority=50, trim_strategy="head_tail"),
+                ContextSection(
+                    name="sandbox_error", role="user",
+                    content="Execution stderr:\n{}".format(
+                        ctx.get("stderr", "(none)")),
+                    required=True, priority=92, trim_strategy="head_tail"),
+                ContextSection(
+                    name="response_schema", role="user",
+                    content=("Analyze functional errors only. For every issue use:\n"
+                             "LINE: <line number>\nCAUSE: <cause>\nFIX: <fix>"),
+                    required=True, priority=98),
+            ]
             critique = chat_completion(
                 client=self.client,
                 model=self.model,
@@ -247,6 +280,7 @@ class TextLoss:
                 temperature=self.temperature,
                 call_kind="textgrad_evaluate",
                 context_config=self.context_config,
+                context_sections=evaluation_sections,
             )
         except ContextGovernorError:
             raise
@@ -429,6 +463,27 @@ class TGD:
         )
 
         try:
+            update_sections = [
+                ContextSection(
+                    name="system_instructions", role="system",
+                    content="You are a code improvement agent. Apply the feedback "
+                            "precisely and return only the updated code.",
+                    required=True, priority=100),
+                ContextSection(
+                    name="previous_code", role="user",
+                    content="Current {}:\n```\n{}\n```".format(
+                        variable.role_description, variable.value),
+                    required=True, priority=90, trim_strategy="head"),
+                ContextSection(
+                    name="sandbox_error", role="user",
+                    content="Required feedback:\n{}".format(feedback),
+                    required=True, priority=95, trim_strategy="head_tail"),
+                ContextSection(
+                    name="response_schema", role="user",
+                    content=("Apply every fix, preserve unrelated content, and return "
+                             "only the improved value in a Python fence when it is code."),
+                    required=True, priority=98),
+            ]
             result = chat_completion(
                 client=self.client,
                 model=self.model,
@@ -441,6 +496,7 @@ class TGD:
                 temperature=self.temperature,
                 call_kind="textgrad_update",
                 context_config=self.context_config,
+                context_sections=update_sections,
             )
 
             # Extract code block if present
