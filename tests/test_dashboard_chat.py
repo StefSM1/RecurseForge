@@ -84,6 +84,7 @@ class DashboardChatTests(unittest.IsolatedAsyncioTestCase):
             "results": [{
                 "task": "Subtask",
                 "result": "Done",
+                "result_frame": {"summary": "Compact done"},
                 "success": True,
                 "code_executed": True,
                 "exit_code": 0,
@@ -91,7 +92,8 @@ class DashboardChatTests(unittest.IsolatedAsyncioTestCase):
             }],
         })
         self.assertIn("[1] Subtask (success)", output)
-        self.assertIn("Done", output)
+        self.assertIn("Compact done", output)
+        self.assertNotIn("\nDone\n", output)
         self.assertIn("Sandbox exit: 0", output)
         self.assertIn("stdout:\nok", output)
 

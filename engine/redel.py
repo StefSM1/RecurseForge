@@ -51,6 +51,11 @@ RULES:
 - If your task involves writing code, wrap it in a single ```python ... ``` block.
 - Your code WILL be executed automatically in a sandbox. Make sure it runs without errors.
 - Include a brief explanation before the code block.
+- After the solution, append a ```json block containing a compact Result Frame:
+  {{"status":"success","summary":"short conclusion","evidence":[],
+  "changes_needed":[],"risks":[],"open_questions":[],"confidence":0.8}}
+- Keep the Result Frame factual and concise. Do not put source code or a copy
+  of the full response in its summary.
 - Do NOT ask clarifying questions -- work with what you have.
 - If a codebase map is provided below, use it to understand the project structure
   and write code that fits naturally with the existing code.
@@ -77,6 +82,8 @@ Your previous code was executed but FAILED with this error:
 Please fix the code and provide the corrected version.
 Wrap the fixed code in a ```python ... ``` block.
 Explain what went wrong and how you fixed it.
+After the corrected solution, append the compact Result Frame JSON block
+described in your system instructions.
 """
 
 

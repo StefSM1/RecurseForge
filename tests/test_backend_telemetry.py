@@ -71,6 +71,11 @@ class BackendTelemetryTests(unittest.TestCase):
     def test_first_attempt_success_event_order(self):
         result = self.run_child("```python\nprint('ok')\n```")
         self.assertTrue(result["results"][0]["success"])
+        self.assertEqual(
+            result["results"][0]["raw_result"],
+            "```python\nprint('ok')\n```")
+        self.assertEqual(
+            result["results"][0]["result_frame"]["status"], "success")
         self.assertEqual(self.event_types(), [
             EventType.SANDBOX_STARTED.value,
             EventType.SANDBOX_COMPLETED.value,
@@ -197,7 +202,9 @@ class BackendTelemetryTests(unittest.TestCase):
         cfg = config()
         validation_state = state(cfg)
         validation_state["results"] = [{
-            "result": "done", "success": False, "code_executed": True,
+            "result": "raw result that should not aggregate",
+            "result_frame": {"summary": "compact summary"},
+            "success": False, "code_executed": True,
             "attempts": 1,
         }]
         graph.validate_node(validation_state)
@@ -205,6 +212,7 @@ class BackendTelemetryTests(unittest.TestCase):
         self.assertEqual(event.event_type, "run_completed")
         self.assertEqual(event.payload["mode"], "delegated")
         self.assertFalse(event.payload["success"])
+        self.assertEqual(event.payload["result_summary"], "compact summary")
 
     def test_text_only_child_bypasses_sandbox(self):
         result = self.run_child("A plain-language answer.")
@@ -213,6 +221,7 @@ class BackendTelemetryTests(unittest.TestCase):
         self.assertEqual([event.event_type for event in events], ["node_complete"])
         event = events[0]
         self.assertEqual(event.payload["result"], "A plain-language answer.")
+        self.assertIn("result_frame", event.payload)
 
     def test_engine_events_have_identity_run_and_engine_timestamp(self):
         self.run_child("A plain-language answer.")

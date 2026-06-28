@@ -16,6 +16,7 @@ Models:
     ContextSection     -- one named, prioritized prompt contribution
     ContextBundle      -- assembled messages plus inclusion telemetry
     TaskCapsule       -- focused downward assignment for one child agent
+    ResultFrame       -- compact upward payload from a completed child
     ExecutionResult   -- sandbox output after running agent code
     Mutation          -- a single fix suggestion inside a TextGradient
     TextGradient      -- structured critique from TextGrad
@@ -189,6 +190,33 @@ class TaskCapsule(VersionedModel):
     requested_files: list[str] = Field(default_factory=list)
     requested_symbols: list[str] = Field(default_factory=list)
     return_format: str = ""
+
+
+class EvidenceRef(VersionedModel):
+    """A bounded source reference supporting a result-frame finding."""
+    file_path: str = ""
+    symbol_name: str | None = None
+    line_start: int | None = Field(default=None, ge=1)
+    line_end: int | None = Field(default=None, ge=1)
+    finding: str = ""
+
+
+class RiskItem(VersionedModel):
+    """A concise risk reported by a child agent."""
+    description: str
+    severity: str = "unknown"
+
+
+class ResultFrame(VersionedModel):
+    """Compact parent-facing result; raw model output is stored separately."""
+    node_id: str
+    status: str
+    summary: str = ""
+    evidence: list[EvidenceRef] = Field(default_factory=list)
+    changes_needed: list[str] = Field(default_factory=list)
+    risks: list[RiskItem] = Field(default_factory=list)
+    open_questions: list[str] = Field(default_factory=list)
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
 class ExecutionResult(VersionedModel):

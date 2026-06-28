@@ -456,7 +456,9 @@ def _format_chat_output(result: dict[str, Any]) -> str:
     for index, item in enumerate(results, start=1):
         task = str(item.get("task") or item.get("node_id") or "Sub-agent")
         success = bool(item.get("success"))
-        result_text = str(item.get("result") or "").strip()
+        result_frame = item.get("result_frame") or {}
+        result_text = str(
+            result_frame.get("summary") or item.get("result") or "").strip()
         status = "success" if success else "failed"
         lines.append("[{}] {} ({})".format(index, task, status))
         if result_text:

@@ -96,7 +96,10 @@ def format_result(result: dict) -> str:
             lines.append(f"\n[{i + 1}] {r['task']}  ({status}){code_tag}{retry_tag}")
 
             # Show LLM response (truncated)
-            llm_text = r.get("result", "") or "(no output)"
+            result_frame = r.get("result_frame") or {}
+            llm_text = (
+                result_frame.get("summary") or r.get("result", "")
+                or "(no output)")
             lines.append(f"    {llm_text[:400]}")
 
             # Show sandbox output if code was executed

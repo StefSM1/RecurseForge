@@ -32,6 +32,17 @@ context_governor:
     sibling_result_tokens: 4096
     sandbox_error_tokens: 4096
 
+result_frames:
+  # Compact parent-facing payload. Full child responses remain in raw_result.
+  max_tokens: 800
+  max_summary_chars: 1800
+  max_evidence: 6
+  max_finding_chars: 500
+  max_changes: 6
+  max_risks: 4
+  max_questions: 4
+  max_item_chars: 400
+
 recursion:
   # Maximum depth of recursive sub-agent spawning.
   # Depth 0 = root agent only. Depth 3 = root + 3 levels of children.

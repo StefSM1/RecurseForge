@@ -26,6 +26,7 @@ from engine import redel
 from engine.context_governor import validate_context_config
 from engine.llm_client import get_client, chat_completion
 from engine.interfaces import EngineEvent, EventType
+from engine.result_frames import build_result_frame
 from harness.event_bus import get_event_bus
 from harness.sandbox import SandboxPool
 from engine.textgrad import gradient_fix
@@ -438,10 +439,15 @@ def execute_node(state: RecursionState) -> dict:
         except Exception as e:
             error_text = str(e)
             child["result"] = None
+            result_frame = build_result_frame(
+                error_text, child["node_id"], False, config)
+            child["result_frame"] = result_frame.model_dump()
             result_entry = {
                 "node_id": child["node_id"],
                 "task": child["task"],
                 "result": error_text,
+                "raw_result": error_text,
+                "result_frame": result_frame.model_dump(),
                 "success": False,
                 "code_executed": False,
                 "attempts": 0,
@@ -457,6 +463,7 @@ def execute_node(state: RecursionState) -> dict:
                 "attempts": 0,
                 "success": False,
                 "failure_reason": "LLM call failed: {}".format(error_text)[:_PREVIEW_LIMIT],
+                "result_frame": result_frame.model_dump(),
             })
             logger.error("[EXECUTE] Child [%s] LLM call failed: %s",
                          child["node_id"], e)
@@ -683,11 +690,16 @@ def execute_node(state: RecursionState) -> dict:
         if exec_result and exec_result.exit_code != 0:
             success = False
 
+        result_frame = build_result_frame(
+            llm_response, child["node_id"], success, config)
         child["result"] = llm_response
+        child["result_frame"] = result_frame.model_dump()
         result_entry = {
             "node_id": child["node_id"],
             "task": child["task"],
             "result": llm_response,
+            "raw_result": llm_response,
+            "result_frame": result_frame.model_dump(),
             "success": success,
             "code_executed": code is not None,
             "attempts": attempts,
@@ -703,6 +715,7 @@ def execute_node(state: RecursionState) -> dict:
             "node_id": child["node_id"],
             "result_summary": llm_response[:200],
             "result": llm_response,
+            "result_frame": result_frame.model_dump(),
             "token_usage": len(llm_response.split()),
             "code_executed": code is not None,
             "sandbox_exit_code": exec_result.exit_code if exec_result else None,
@@ -741,7 +754,10 @@ def validate_node(state: RecursionState) -> dict:
                        len(failed), len(results),
                        len(code_runs), len(retried))
 
-    summaries = [str(r.get("result", "")) for r in results]
+    summaries = [
+        str((r.get("result_frame") or {}).get("summary") or r.get("result", ""))
+        for r in results
+    ]
     _emit(EventType.RUN_COMPLETED, _run_id(state), {
         "success": all_success,
         "mode": "delegated",
