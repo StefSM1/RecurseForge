@@ -15,6 +15,11 @@ RecurseForge is a summer project that combines four powerful ideas from the open
   - [What Is an Agentic Loop?](#what-is-an-agentic-loop)
   - [What Is Sub-Agent Spawning?](#what-is-sub-agent-spawning)
   - [Why LangGraph?](#why-langgraph)
+- [Keeping Context Under Control](#keeping-context-under-control)
+  - [Phase 1: Measure Before Sending](#phase-1-measure-before-sending)
+  - [Phase 2: Pack Context by Priority](#phase-2-pack-context-by-priority)
+  - [Phase 3: Task Capsules](#phase-3-task-capsules)
+  - [Phase 4: Result Frames](#phase-4-result-frames)
 - [How Each Module Works](#how-each-module-works)
   - [The Spawning Logic (redel.py)](#the-spawning-logic-redelpy)
   - [The State Machine (graph.py)](#the-state-machine-graphpy)
@@ -76,9 +81,12 @@ Imagine you give a complex task to a single AI. It tries to do everything at onc
                     +-------------------+
 ```
 
-The **Root Agent** acts like a manager. It decides whether a task is too big to handle alone. If so, it spawns independent sub-agents, each with their own focused task. Each sub-agent works in isolation, returns its result, and the root agent collects everything.
+The **Root Agent** acts like a manager. It decides whether a task is too big to handle alone. If so, it spawns independent sub-agents, each with their own focused task. Each sub-agent works on its assignment and returns a compact report for validation and aggregation.
 
-This is the core of RecurseForge. And it can go deeper -- a sub-agent can spawn its own sub-agents, creating a tree of recursive delegation. A safety limit (`max_depth`) prevents infinite recursion.
+This is the core direction of RecurseForge. The data structures include parent IDs,
+depth, and `max_depth` for recursive delegation, but the graph compiled today plans
+once at the root and executes one child layer. Recursive child re-planning remains a
+future engine extension rather than something the current runtime already does.
 
 ---
 
@@ -173,7 +181,9 @@ Key points:
 - Each TA gets their own **instructions** (system prompt) and **assignment** (task).
 - The teacher **collects** results and produces the final output.
 
-In our code, `engine/redel.py` handles spawning. Each sub-agent is a plain dictionary with a unique ID, a task, and a depth counter.
+In our code, `engine/redel.py` handles spawning. Each child is represented by a
+dictionary containing its unique ID, parent, legacy task label, structured Task
+Capsule, and depth counter.
 
 ---
 
@@ -229,7 +239,141 @@ LangGraph replaces this with a **graph** -- a visual, testable flow:
   +------+
 ```
 
-**The key insight:** The LLM does NOT control the flow. The graph does. The LLM only makes decisions *inside* specific nodes. This prevents the AI from going off the rails -- it can't skip the Validate step or loop forever.
+**The key insight:** The LLM does not directly wire the flow; the graph does. The LLM
+makes decisions inside specific nodes, and the graph selects a declared route. A direct
+answer intentionally ends after Plan, while delegated work must pass through Execute
+and Validate.
+
+---
+
+## Keeping Context Under Control
+
+A 65K context window is a large desk, but a recursive system can still bury that
+desk under repeated instructions, code maps, error logs, and child responses.
+RecurseForge therefore treats context as a **budgeted pipeline**, not a bucket to
+fill completely.
+
+```
+  Parent has a task
+          |
+          v
+  +-------------------+
+  | Measure + pack    |  Keep required facts, trim optional background
+  +-------------------+
+          |
+          v
+  +-------------------+
+  | Task Capsule      |  Small assignment sent to a child
+  +-------------------+
+          |
+          v
+       Child works
+          |
+          v
+  +-------------------+
+  | Result Frame      |  Small report returned to the parent
+  +-------------------+
+          |
+          v
+  Full response remains available for debugging
+```
+
+This is split into four phases so each safety boundary remains understandable.
+
+### Phase 1: Measure Before Sending
+
+Before any prompt reaches llama.cpp, RecurseForge estimates its size and checks:
+
+```
+  prompt + reserved answer + safety buffer <= model context window
+
+  49,152 + 8,192 + 8,192 = 65,536 tokens
+```
+
+The numbers are ceilings, not goals. If required input cannot fit, the request is
+stopped before inference with a useful error instead of failing mysteriously inside
+the model server.
+
+**Analogy:** An airline weighs a suitcase before loading it onto the plane.
+
+### Phase 2: Pack Context by Priority
+
+Prompts are divided into labeled sections rather than glued into one giant string:
+
+```
+  MUST KEEP                         OPTIONAL
+  +----------------------+          +----------------------+
+  | System rules         |          | Repository map       |
+  | Current task         |          | Older background     |
+  | Required format      |          | Sibling summaries    |
+  | Current error        |          | Extra context        |
+  +----------------------+          +----------------------+
+```
+
+When space gets tight, optional low-priority sections are removed first. Long error
+tracebacks keep their beginning and ending, where the exception type and useful call
+sites usually live. The same input always produces the same packed prompt; no extra
+LLM call is used for trimming.
+
+This phase does **not** reuse the model's KV cache. It decides what information belongs
+in each request.
+
+### Phase 3: Task Capsules
+
+Children no longer receive vague instructions or a copied parent transcript. They
+receive a compact assignment card:
+
+```
+  TASK: Inspect retry handling
+  ROLE: Debugger
+  GOAL: Find why failed attempts overwrite history
+  KNOWN FACTS: Retries already exist
+  CONSTRAINTS: Keep event names unchanged
+  SUCCESS: Identify the responsible function
+  REQUESTED FILES: engine/graph.py
+  RETURN FORMAT: Concise findings
+```
+
+Old string subtasks still work, but structured capsules make delegation clearer and
+prevent context from multiplying as work moves down the agent tree.
+
+**Analogy:** A manager gives a specialist a focused work order, not a recording of
+every meeting that happened before it.
+
+### Phase 4: Result Frames
+
+The return path uses the same discipline. A child may produce a long explanation or
+code response, but its parent receives a compact report:
+
+```json
+{
+  "status": "success",
+  "summary": "The retry parser is in parse_plan_response().",
+  "evidence": [],
+  "changes_needed": [],
+  "risks": [],
+  "open_questions": [],
+  "confidence": 0.9
+}
+```
+
+```
+  Full child response -----------------> kept for debugging
+                |
+                +----> Result Frame ---> parent and validation
+                           (~800-token target)
+```
+
+If the model forgets the JSON or formats it badly, RecurseForge creates a bounded
+fallback from the prose. Sandbox truth always wins: failed code cannot become a
+successful frame merely because the model claimed it worked.
+
+Together, the four phases stop context growth in both directions:
+
+- measurement prevents invisible overflow;
+- deterministic packing removes low-value input;
+- Task Capsules keep downward delegation focused;
+- Result Frames keep upward aggregation compact.
 
 ---
 
@@ -249,12 +393,13 @@ This file handles the **Plan** step -- the moment the LLM decides whether to del
      |  (via llama.cpp on localhost:8080)
      v
   3. Parse JSON response
-     |  {"delegate": true, "subtasks": ["task A", "task B"]}
+     |  {"delegate": true, "subtasks": [{"task": "task A",
+     |    "role": "researcher", "goal": "...", ...}]}
      |  OR
      |  {"delegate": false, "answer": "The answer is 42"}
      v
   4. Spawn children (if delegating)
-     |  Each subtask becomes: {node_id, parent_id, task, depth+1}
+     |  Each becomes: {node_id, parent_id, task, task_capsule, depth+1}
      |  Safety checks: max_depth, max_children
      v
   5. Return to graph
@@ -283,9 +428,9 @@ Each node is a simple Python function that receives the current state and return
 | Node | What it does |
 |------|-------------|
 | `init_node` | Resets counters, sets status to "planning" |
-| `plan_node` | Calls the LLM (with thinking disabled for speed), parses the response, spawns children or stores the direct answer. If the answer contains code, runs it in the sandbox |
+| `plan_node` | Calls the LLM (requesting no-thinking mode), parses the response, spawns children or stores the direct answer. If the answer contains code, runs it in the sandbox |
 | `execute_node` | For each child: fetches repo-map context, calls the LLM, extracts Python code, runs it in the sandbox, retries on failure (up to 2x) |
-| `validate_node` | Checks sandbox results, reports code execution stats and retry counts |
+| `validate_node` | Checks sandbox truth, reports execution stats, and aggregates compact Result Frame summaries |
 
 **The routing function** `route_after_plan` is what makes the graph dynamic. After the Plan node runs, it checks: did we spawn children? If yes -> go to Execute. If no -> go to END.
 
@@ -308,6 +453,10 @@ Why use the OpenAI SDK for a local model? Because llama.cpp exposes an **OpenAI-
 - No llama.cpp-specific Python bindings needed
 - If you later switch to a cloud provider, you only change the URL
 - The same code works with any OpenAI-compatible endpoint
+
+Before the SDK sends anything, the Context Governor measures and assembles the
+request. This keeps token budgeting in one place instead of relying on every graph
+node to remember the rules.
 
 ---
 
@@ -341,6 +490,7 @@ The separation matters:
 | `--task "..."` | One-shot mode -- runs the task immediately without prompting |
 | `--verbose` / `-v` | Enables DEBUG-level logging to stderr (shows every LLM call, every state transition) |
 | `--json` | Outputs the raw graph state as JSON instead of formatted text |
+| `--dashboard` | Starts the optional visual dashboard alongside the same engine |
 
 You can combine flags: `--task "..." --verbose --json` runs a task with full debug logging AND raw JSON output.
 
@@ -348,7 +498,7 @@ You can combine flags: `--task "..." --verbose --json` runs a task with full deb
 
 ### The Sandbox (`sandbox.py`)
 
-The sandbox is a clean room where sub-agents can safely run their generated code.
+The sandbox is a lightweight test room where sub-agents run generated code.
 
 ```
   Agent generates code
@@ -371,7 +521,11 @@ The sandbox is a clean room where sub-agents can safely run their generated code
   {exit_code, stdout, stderr}
 ```
 
-Each execution is **isolated** -- the subprocess has a restricted environment (no PYTHONPATH, limited HOME). If the code crashes, loops forever, or does something unexpected, only the temp subprocess is affected. After execution, the temp file is deleted.
+Each execution gets a fresh subprocess, restricted environment, timeout, captured
+output, and temporary file cleanup. This contains ordinary crashes and runaway loops,
+but it is **not a hardened security sandbox**: generated Python still runs with the
+current user's operating-system permissions. Use it for trusted local-model output,
+not hostile code.
 
 **Why not Docker?** Docker adds ~500ms startup latency per container. For our local setup, Python subprocesses are faster and simpler. Docker support can be added later as an optional backend.
 
@@ -394,9 +548,12 @@ The event bus is like a bulletin board. When something important happens, the en
                             +---------------+            CLI Logger
                            
   VRAM monitor              +------------+
-  detects spike --------->  | VRAM_ALERT | ------->  VRAM Manager
-                            +------------+            (demotes L1->L2)
+  detects spike --------->  | VRAM_ALERT | ------->  Dashboard / logger
+                            +------------+            (recommended action)
 ```
+
+Sandbox attempts and corrections also emit lifecycle events, so failed execution,
+TextGrad diagnosis, and retries can be reconstructed without changing graph logic.
 
 The engine doesn't need to know who's reading the notes. It just posts them. This is called **pub/sub** (publish/subscribe) and keeps components loosely connected.
 
@@ -423,7 +580,10 @@ Manages context data across three tiers, like a desk with drawers and a filing c
 - **L1**: Recently accessed file summaries (tree-sitter representations)
 - **L2**: Full history serialized to disk as JSON files
 
-When the VRAM monitor detects memory pressure, it triggers automatic demotion. When an agent needs old context back, it gets promoted from disk.
+The manager automatically demotes blocks when its own L0 capacity is full. The VRAM
+monitor separately emits warning/critical events and recommended actions. Those alerts
+are observable today, but they are not yet wired to call the manager's demotion methods
+automatically. When a stored block is requested, the manager can promote it again.
 
 ---
 
@@ -450,7 +610,12 @@ A standalone FastAPI service that gives sub-agents a "table of contents" for you
                                   ...
 ```
 
-Instead of dumping an entire codebase into the agent's prompt (which would blow up VRAM), the agent sees a compressed **XML map** of class names, function signatures, and line numbers. In 65k-context mode, the default map budget is 4096 tokens: large enough to be useful, still small enough to avoid turning every sub-agent call into a full-codebase prompt. When it needs actual code, it requests specific files or symbols via the `/lookup` endpoint.
+Instead of dumping an entire codebase into the agent's prompt, the agent sees a
+compressed **XML map** of class names, function signatures, and line numbers. In
+65K-context mode, the default map budget is 4096 tokens: large enough to be useful,
+still small enough to avoid turning every child call into a full-codebase prompt.
+The server exposes `/lookup` for specific files and symbols, but the current graph does
+not invoke targeted lookup automatically yet; that belongs to the later retrieval work.
 
 ---
 
@@ -585,6 +750,7 @@ Here is the complete journey of a task through the system:
           |    GraphState       |
           | {                   | 
           |   task_id: "root",  |
+          |   run_id: "...",    |
           |   description: ..,  |
           |   status: "init",   |
           |   children: [],     |
@@ -601,8 +767,10 @@ Here is the complete journey of a task through the system:
           |  {                  |
           |   delegate: true,   |
           |   subtasks: [       |
-          |     "Write sort",   |
-          |     "Write filter"  |
+          |     {task: "sort",  |
+          |      goal: "..."},  |
+          |     {task: "filter",|
+          |      goal: "..."}   |
           |   ]                 |
           |  }                  |
           +---------------------+
@@ -613,6 +781,7 @@ Here is the complete journey of a task through the system:
           |  children: [        |
           |    {id: "a1",       |
           |     task: "sort",   |
+          |     task_capsule: {},|
           |     depth: 1},      |
           |    {id: "b2",       |
           |     task: "filter"  |
@@ -624,22 +793,26 @@ Here is the complete journey of a task through the system:
                     |
           +--------------------+
           |  1. Fetch repo-map |  (codebase structure from server)
-          |  2. Call LLM       |  (with context injected)
-          |  3. Extract code   |  (regex for ```python blocks)
-          |  4. Run in sandbox |  (isolated subprocess)
-          |  5. If fails:      |
+          |  2. Govern context |  (measure, pack, preserve required sections)
+          |  3. Call LLM       |  (with Task Capsule + selected context)
+          |  4. Extract code   |  (regex for ```python blocks)
+          |  5. Run in sandbox |  (isolated subprocess)
+          |  6. If fails:      |
           |     send error     |
           |     back to LLM    |
           |     retry (up 2x)  |
           +--------------------+
                     |
-                    v  (results with sandbox output)
+                    v  (raw results + compact Result Frames)
                     |
           +---------------------+
           |  results: [         |
           |    {id: "a1",       |
           |     result: "def    |
           |       sort(l):...", |
+          |     raw_result: ...,|
+          |     result_frame:   |
+          |       {summary: ...},|
           |     success: true,  |
           |     code_executed:  |
           |       true,         |
@@ -658,7 +831,7 @@ Here is the complete journey of a task through the system:
 
 ## Architecture Overview
 
-The full architecture (across all phases) has four layers:
+The built engine combines five cooperating layers:
 
 ```
   +--------------------------------------------------------+
@@ -673,16 +846,22 @@ The full architecture (across all phases) has four layers:
   +-------------------------------------------------------+
                           |
                           v
-  +----------------------------------------------------=---+
+  +--------------------------------------------------------+
   |          AIDER/REPOMIX: Context Optimization           |
   |    (Token-efficient AST repo maps, XML packing)        |
-  +-----------------------------------------------------=--+
+  +--------------------------------------------------------+
                           |
                           v
-  +-----------------------------------------------------=--+
+  +--------------------------------------------------------+
   |          TEXTGRAD: Textual Backpropagation             |
   |    (Computes linguistic gradients, self-corrects)      |
-  +-----------------------------------------------------=--+
+  +--------------------------------------------------------+
+                          |
+                          v
+  +--------------------------------------------------------+
+  |       CONTEXT PROTOCOL: Governor + Capsules + Frames   |
+  |     (Bounds requests and child-to-parent communication) |
+  +--------------------------------------------------------+
 ```
 
 | Layer           | File                      | Phase   | Status        |
@@ -698,7 +877,10 @@ The full architecture (across all phases) has four layers:
 | VRAM Monitor    | `harness/vram_monitor.py` | 2       | Built         |
 | Event Bus       | `harness/event_bus.py`    | 2       | Built         |
 | TextGrad Engine | `engine/textgrad.py`      | 3a      | Built         |
-| Dashboard       | `harness/dashboard.py`    | Future  | Not yet built |
+| Context Governor| `engine/context_governor.py` | Context 1-2 | Built    |
+| Task Capsules   | `engine/redel.py`         | Context 3 | Built       |
+| Result Frames   | `engine/result_frames.py` | Context 4 | Built       |
+| Dashboard       | `dashboard/`              | Visual client | Built    |
 
 ---
 
@@ -716,8 +898,20 @@ Single-variable textual backpropagation. When sandbox execution fails, the Diagn
 ### Phase 3b: Full TextGrad -- FUTURE
 Multi-variable backpropagation through the execution tree. Gradients flow from child nodes back to parent prompts. Dynamic graph traversal to route gradients to the correct variable. Information density scoring on gradients.
 
-### Dashboard -- FUTURE
-Streamlit visualization for the execution tree, gradient flows, VRAM timeline, and per-node inspector. Critical for debugging Phase 3b.
+### Dashboard -- BUILT
+An optional visual representation of the existing engine. It monitors agents,
+sandbox attempts, retries, resources, and chat runs; it does not define RecurseForge's
+reasoning or execution rules.
+
+### Context Optimization Task 1 -- DONE
+Hard prompt budgets, deterministic context packing, Task Capsules, and Result Frames.
+Together they bound both downward assignments and upward child results while preserving
+full debug output.
+
+### Workspace Agent -- PLANNED
+A persistent workspace and editor-oriented Plan/Worker/Debug workflow. This is the next
+major product architecture step; advanced retrieval and error-ledger work can be added
+where real workspace measurements justify it.
 
 ---
 
@@ -727,7 +921,7 @@ Streamlit visualization for the execution tree, gradient flows, VRAM timeline, a
 
 1. **llama.cpp server** running with your Qwen model on port 8080:
    ```
-   llama-server.exe -m path\to\qwen.gguf --port 8080 --ctx-size 65536 --n-gpu-layers 99 -t 8
+   llama-server.exe -m path\to\qwen.gguf -ngl 99 --ctx-size 65536 --flash-attn on --cache-type-k q8_0 --cache-type-v q4_0
    ```
    If your llama.cpp build supports KV cache quantization, your tested 65k profile
    of Q8 K + Q4 V cache is the practical target for this project. Keep MTP off
@@ -755,6 +949,9 @@ python -m harness.cli --task "Explain recursion" --json
 
 # Combine flags
 python -m harness.cli --task "Complex task here" --verbose --json
+
+# Start the optional visual dashboard and interactive chat
+python -m harness.cli --dashboard --verbose
 ```
 
 ---
@@ -769,6 +966,8 @@ RecurseForge/
 |   +-- redel.py                # Task decomposition, code extraction, retry prompts
 |   +-- llm_client.py           # OpenAI SDK wrapper with thinking mode control
 |   +-- interfaces.py           # Pydantic v2 models (all interface contracts)
+|   +-- context_governor.py     # Prompt measurement + deterministic context assembly
+|   +-- result_frames.py        # Compact child-to-parent result parsing and limits
 |   +-- textgrad.py             # TextGrad engine (TextVariable, TextLoss, TGD)
 |
 +-- context/                    # Context optimization layer
@@ -780,7 +979,9 @@ RecurseForge/
 |   +-- sandbox.py              # Sandbox executor pool (subprocess workers)
 |   +-- vram_monitor.py         # VRAM monitor daemon (pynvml polling)
 |   +-- event_bus.py            # Engine-harness event bus (queue.Queue)
-|   +-- dashboard.py            # (Future) Gradient log viewer (Streamlit)
+|   +-- dashboard_server.py     # Dashboard REST/WebSocket/chat bridge
+|
++-- dashboard/                  # Optional React/TypeScript visualization client
 |
 +-- .venv/                      # Python virtual environment
 +-- .devcontainer/              # Docker dev container config
@@ -788,6 +989,5 @@ RecurseForge/
 +-- requirements.txt            # Python dependencies
 +-- AGENTS.md                   # AI agent development guide
 +-- README.md                   # This file (human-readable)
-+-- LLMRecursionPlan_v2.txt     # Architecture theory + interface contracts
-+-- HarnessPlan.txt             # Custom harness specification
++-- .plans/                     # Architecture and implementation plans
 ```
