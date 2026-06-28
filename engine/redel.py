@@ -14,7 +14,7 @@ import json
 import re
 import uuid
 
-from engine.interfaces import ContextSection
+from engine.interfaces import ContextSection, TaskCapsule
 
 # ---------------------------------------------------------------------------
 # Prompt templates
@@ -31,10 +31,15 @@ RULES:
   If depth equals max_depth, you MUST answer directly -- no more delegation.
 - Maximum sub-tasks per level: {max_children}.
 - Each sub-task must be independently solvable without referencing siblings.
-- Keep sub-task descriptions clear and self-contained.
+- Return every sub-task as a compact object with: task, role, goal,
+  known_facts, constraints, success_criteria, requested_files,
+  requested_symbols, and return_format.
+- Use empty arrays or empty strings when optional details are unavailable.
+- Keep assignments clear, factual, and self-contained. Do not copy your
+  reasoning transcript into a sub-task.
 
 Respond in this EXACT JSON format (no markdown, no code fences, raw JSON):
-  Option A (delegate): {{"delegate": true, "subtasks": ["task 1", "task 2"]}}
+  Option A (delegate): {{"delegate": true, "subtasks": [{{"task": "task 1", "role": "researcher", "goal": "specific outcome", "known_facts": [], "constraints": [], "success_criteria": ["objective check"], "requested_files": [], "requested_symbols": [], "return_format": "concise findings"}}]}}
   Option B (answer):   {{"delegate": false, "answer": "your complete answer here"}}
 """
 
@@ -142,7 +147,36 @@ def build_execute_messages(task: str, repo_map: str = "") -> list[dict]:
     ]
 
 
-def build_execute_sections(task: str, repo_map: str = "") -> list[ContextSection]:
+def render_task_capsule(capsule: TaskCapsule) -> str:
+    """Render a capsule compactly, omitting empty optional fields."""
+    lines = ["TASK: {}".format(capsule.task)]
+    scalar_fields = [
+        ("ROLE", capsule.role),
+        ("GOAL", capsule.goal),
+        ("RETURN FORMAT", capsule.return_format),
+    ]
+    list_fields = [
+        ("KNOWN FACTS", capsule.known_facts),
+        ("CONSTRAINTS", capsule.constraints),
+        ("SUCCESS CRITERIA", capsule.success_criteria),
+        ("REQUESTED FILES", capsule.requested_files),
+        ("REQUESTED SYMBOLS", capsule.requested_symbols),
+    ]
+    for label, value in scalar_fields:
+        if value:
+            lines.append("{}: {}".format(label, value))
+    for label, values in list_fields:
+        if values:
+            lines.append("{}:\n- {}".format(label, "\n- ".join(values)))
+    return "\n".join(lines)
+
+
+def build_execute_sections(
+    task: str,
+    repo_map: str = "",
+    task_capsule: TaskCapsule | dict | None = None,
+) -> list[ContextSection]:
+    capsule = normalize_task_capsule(task_capsule or task)
     sections = [
         ContextSection(
             name="system_instructions", role="system",
@@ -155,7 +189,7 @@ def build_execute_sections(task: str, repo_map: str = "") -> list[ContextSection
             content=REPO_MAP_TEMPLATE.format(repo_map=repo_map),
             required=False, priority=30, trim_strategy="head"))
     sections.append(ContextSection(
-        name="current_task", role="user", content=task,
+        name="task_capsule", role="user", content=render_task_capsule(capsule),
         required=True, priority=95))
     return sections
 
@@ -273,6 +307,14 @@ def parse_plan_response(llm_output: str) -> dict:
         try:
             parsed = json.loads(json_str)
             if "delegate" in parsed:
+                if parsed.get("delegate"):
+                    subtasks = parsed.get("subtasks", [])
+                    if not isinstance(subtasks, list):
+                        subtasks = [subtasks] if subtasks else []
+                    parsed["subtasks"] = [
+                        normalize_task_capsule(item).model_dump()
+                        for item in subtasks
+                    ]
                 return parsed
             # Model returned {"answer": "..."} without "delegate" field
             if "answer" in parsed:
@@ -282,6 +324,40 @@ def parse_plan_response(llm_output: str) -> dict:
 
     # Fallback: treat entire output as a direct answer
     return {"delegate": False, "answer": llm_output}
+
+
+def _string_list(value: object) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
+
+
+def normalize_task_capsule(value: object) -> TaskCapsule:
+    """Normalize legacy or imperfect planner output without losing its task."""
+    if isinstance(value, TaskCapsule):
+        return value
+    if isinstance(value, str):
+        return TaskCapsule(task=value.strip() or "Complete the assigned sub-task")
+    if isinstance(value, dict):
+        raw_task = value.get("task")
+        if not isinstance(raw_task, str) or not raw_task.strip():
+            raw_goal = value.get("goal")
+            raw_task = raw_goal if isinstance(raw_goal, str) else json.dumps(
+                value, ensure_ascii=True, default=str)
+        return TaskCapsule(
+            task=raw_task.strip(),
+            role=str(value.get("role", "") or "").strip(),
+            goal=str(value.get("goal", "") or "").strip(),
+            known_facts=_string_list(value.get("known_facts")),
+            constraints=_string_list(value.get("constraints")),
+            success_criteria=_string_list(value.get("success_criteria")),
+            requested_files=_string_list(value.get("requested_files")),
+            requested_symbols=_string_list(value.get("requested_symbols")),
+            return_format=str(value.get("return_format", "") or "").strip(),
+        )
+    return TaskCapsule(task=str(value).strip() or "Complete the assigned sub-task")
 
 
 # ---------------------------------------------------------------------------
@@ -325,11 +401,13 @@ def spawn_children(
 
     parent_id = state.get("task_id", "root")
     children = []
-    for task_text in subtasks:
+    for subtask in subtasks:
+        capsule = normalize_task_capsule(subtask)
         children.append({
             "node_id": str(uuid.uuid4())[:8],  # short unique id
             "parent_id": parent_id,
-            "task": task_text,
+            "task": capsule.task,
+            "task_capsule": capsule.model_dump(),
             "depth": current_depth + 1,
             "result": None,
         })

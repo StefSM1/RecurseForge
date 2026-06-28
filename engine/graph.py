@@ -422,7 +422,8 @@ def execute_node(state: RecursionState) -> dict:
         # --- LLM call with repo-map context ---
         messages = redel.build_execute_messages(child["task"], repo_map=repo_map)
         context_sections = redel.build_execute_sections(
-            child["task"], repo_map=repo_map)
+            child["task"], repo_map=repo_map,
+            task_capsule=child.get("task_capsule"))
         try:
             llm_response = chat_completion(
                 client=client,

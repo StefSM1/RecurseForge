@@ -15,6 +15,7 @@ Models:
     ContextBudgetReport -- per-call context preflight telemetry
     ContextSection     -- one named, prioritized prompt contribution
     ContextBundle      -- assembled messages plus inclusion telemetry
+    TaskCapsule       -- focused downward assignment for one child agent
     ExecutionResult   -- sandbox output after running agent code
     Mutation          -- a single fix suggestion inside a TextGradient
     TextGradient      -- structured critique from TextGrad
@@ -175,6 +176,19 @@ class ContextBundle(VersionedModel):
     omitted_sections: list[str] = Field(default_factory=list)
     section_token_counts: dict[str, int] = Field(default_factory=dict)
     budget_report: ContextBudgetReport | None = None
+
+
+class TaskCapsule(VersionedModel):
+    """A compact, self-contained assignment passed from parent to child."""
+    task: str
+    role: str = ""
+    goal: str = ""
+    known_facts: list[str] = Field(default_factory=list)
+    constraints: list[str] = Field(default_factory=list)
+    success_criteria: list[str] = Field(default_factory=list)
+    requested_files: list[str] = Field(default_factory=list)
+    requested_symbols: list[str] = Field(default_factory=list)
+    return_format: str = ""
 
 
 class ExecutionResult(VersionedModel):
