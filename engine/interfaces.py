@@ -85,6 +85,33 @@ class EventType(str, enum.Enum):
     CORRECTION_COMPLETED = "correction_completed"
     GRADIENT_FLOW = "gradient_flow"
     VRAM_ALERT = "vram_alert"
+    STAGE_STARTED = "stage_started"
+    STAGE_COMPLETED = "stage_completed"
+    FILE_TOOL_STARTED = "file_tool_started"
+    FILE_TOOL_COMPLETED = "file_tool_completed"
+    WORKSPACE_CHANGED = "workspace_changed"
+    WORKSPACE_LOCK_CHANGED = "workspace_lock_changed"
+
+
+class RunMode(str, enum.Enum):
+    CHAT = "chat"
+    WORKSPACE_AGENT = "workspace_agent"
+
+
+class WorkspaceStage(str, enum.Enum):
+    PLAN = "plan"
+    WORKER = "worker"
+    DEBUG = "debug"
+    ROOT_SYNTHESIS = "root_synthesis"
+
+
+class WorkspaceRunStatus(str, enum.Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCESS = "success"
+    FAILED = "failed"
+    INCOMPLETE = "incomplete"
+    CANCELED = "canceled"
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +254,99 @@ class ExecutionResult(VersionedModel):
     stderr: str = ""
     exit_code: int = 0
     token_usage: int = 0
+
+
+# ---------------------------------------------------------------------------
+# Workspace-agent contracts
+# ---------------------------------------------------------------------------
+
+class WorkspaceFileRef(VersionedModel):
+    path: str
+    revision: str
+    size_bytes: int = Field(ge=0)
+
+
+class WorkspaceFileRevision(VersionedModel):
+    path: str
+    content_hash: str
+    workspace_revision: int = Field(ge=0)
+    modified_at: float = Field(default_factory=time.time)
+
+
+class WorkspaceLock(VersionedModel):
+    path: str
+    owner_id: str
+    acquired_at: float = Field(default_factory=time.time)
+
+
+class PlanFrame(VersionedModel):
+    objective: str
+    steps: list[str] = Field(default_factory=list)
+    relevant_files: list[str] = Field(default_factory=list)
+    success_criteria: list[str] = Field(default_factory=list)
+
+
+class WorkerCompletion(VersionedModel):
+    summary: str
+    changed_files: list[WorkspaceFileRef] = Field(default_factory=list)
+    test_results: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class DebugVerdict(VersionedModel):
+    verdict: str
+    findings: list[str] = Field(default_factory=list)
+    affected_files: list[str] = Field(default_factory=list)
+    rationale: str = ""
+    required_changes: list[str] = Field(default_factory=list)
+
+
+class FixRequest(VersionedModel):
+    pass_number: int = Field(ge=1)
+    findings: list[str] = Field(default_factory=list)
+    affected_files: list[str] = Field(default_factory=list)
+    required_changes: list[str] = Field(default_factory=list)
+
+
+class FileToolRun(VersionedModel):
+    tool_run_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    run_id: str
+    actor_id: str
+    stage: str
+    pass_number: int = Field(ge=1)
+    operation: str
+    path: str | None = None
+    status: str = WorkspaceRunStatus.PENDING.value
+    revision_before: str | None = None
+    revision_after: str | None = None
+    started_at: float = Field(default_factory=time.time)
+    completed_at: float | None = None
+    error: str | None = None
+
+
+class StageRun(VersionedModel):
+    stage_run_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    run_id: str
+    stage: str
+    pass_number: int = Field(ge=1)
+    status: str = WorkspaceRunStatus.PENDING.value
+    started_at: float | None = None
+    completed_at: float | None = None
+
+
+class WorkspaceAgentState(VersionedModel):
+    run_id: str
+    pass_number: int = Field(default=1, ge=1)
+    workspace_revision: int = Field(default=0, ge=0)
+    status: str = WorkspaceRunStatus.PENDING.value
+    plan: PlanFrame | None = None
+    changed_files: list[WorkspaceFileRef] = Field(default_factory=list)
+    manifest: dict[str, Any] | None = None
+    test_results: list[dict[str, Any]] = Field(default_factory=list)
+    debug_verdict: DebugVerdict | None = None
+    tool_calls_used: int = Field(default=0, ge=0)
+    helpers_used: int = Field(default=0, ge=0)
+    cancellation_requested: bool = False
+    final_summary: str | None = None
 
 
 # ---------------------------------------------------------------------------

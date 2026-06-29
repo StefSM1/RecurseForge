@@ -4,6 +4,7 @@ __pycache__/
 *.pyo
 .qoder
 .plans
+.recurseforge/
 
 *.png
 *.jpg

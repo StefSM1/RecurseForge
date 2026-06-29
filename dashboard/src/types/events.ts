@@ -12,6 +12,35 @@ export type EventType =
   | 'correction_completed'
   | 'gradient_flow'
   | 'vram_alert'
+  | 'stage_started'
+  | 'stage_completed'
+  | 'file_tool_started'
+  | 'file_tool_completed'
+  | 'workspace_changed'
+  | 'workspace_lock_changed'
+
+export type RunMode = 'chat' | 'workspace_agent'
+export type WorkspaceOperation = 'create' | 'save' | 'edit' | 'delete' | 'restore' | 'archive' | 'reset'
+export type WorkspaceRunStatus = 'pending' | 'running' | 'success' | 'failed' | 'incomplete' | 'canceled'
+
+export interface WorkspaceFileRef {
+  path: string
+  revision: string
+  size_bytes: number
+}
+
+export interface WorkspaceChangedPayload {
+  operation: WorkspaceOperation
+  path?: string
+  workspace_revision: number
+  revision?: string
+}
+
+export interface WorkspaceLockChangedPayload {
+  path: string
+  owner_id: string
+  locked: boolean
+}
 
 export interface RunStartedPayload {
   task: string
@@ -125,6 +154,9 @@ export type EventPayload =
   | CorrectionCompletedPayload
   | GradientFlowPayload
   | VRAMAlertPayload
+  | WorkspaceChangedPayload
+  | WorkspaceLockChangedPayload
+  | Record<string, unknown>
 
 export interface EngineEvent {
   event_id?: string

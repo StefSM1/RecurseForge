@@ -55,6 +55,7 @@ _dashboard_started_bus = False
 
 _chat_runs_lock = threading.Lock()
 _chat_runs: dict[str, dict[str, Any]] = {}
+_workspace_service = None
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +244,137 @@ async def get_resources():
         pass
 
     return resources
+
+
+def _get_workspace_service():
+    """Lazily create the process-wide workspace storage boundary."""
+    global _workspace_service
+    if _workspace_service is None:
+        from harness.workspace_service import WorkspaceService, WorkspaceSettings
+
+        config = _load_dashboard_config().get("workspace", {})
+        configured_root = Path(config.get("root", ".recurseforge"))
+        if not configured_root.is_absolute():
+            configured_root = _PROJECT_ROOT / configured_root
+        _workspace_service = WorkspaceService(WorkspaceSettings(
+            root=configured_root,
+            active_dir=str(config.get("active_dir", "workspace/current")),
+            history_dir=str(config.get("history_dir", "workspace-history")),
+            trash_dir=str(config.get("trash_dir", "workspace-trash")),
+            max_file_bytes=int(config.get("max_file_bytes", 1024 * 1024)),
+            max_workspace_bytes=int(config.get("max_workspace_bytes", 100 * 1024 * 1024)),
+        ))
+    return _workspace_service
+
+
+def _workspace_call(operation, *args, **kwargs):
+    from harness.workspace_service import WorkspaceError
+
+    try:
+        return operation(*args, **kwargs)
+    except WorkspaceError as exc:
+        raise HTTPException(
+            status_code=exc.status,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+
+
+@app.get("/api/workspace/tree")
+async def workspace_tree():
+    return _workspace_call(_get_workspace_service().tree)
+
+
+@app.get("/api/workspace/file")
+async def workspace_read_file(path: str):
+    return _workspace_call(_get_workspace_service().read_file, path)
+
+
+@app.post("/api/workspace/file")
+async def workspace_create_file(request_data: dict):
+    return _workspace_call(
+        _get_workspace_service().create_file,
+        request_data.get("path", ""),
+        request_data.get("content", ""),
+        owner_id=request_data.get("owner_id"),
+    )
+
+
+@app.put("/api/workspace/file")
+async def workspace_save_file(request_data: dict):
+    return _workspace_call(
+        _get_workspace_service().save_file,
+        request_data.get("path", ""),
+        request_data.get("content", ""),
+        request_data.get("expected_revision", ""),
+        owner_id=request_data.get("owner_id"),
+    )
+
+
+@app.patch("/api/workspace/file")
+async def workspace_edit_file(request_data: dict):
+    return _workspace_call(
+        _get_workspace_service().edit_file,
+        request_data.get("path", ""),
+        request_data.get("expected_revision", ""),
+        request_data.get("replacements", []),
+        owner_id=request_data.get("owner_id"),
+    )
+
+
+@app.delete("/api/workspace/file")
+async def workspace_delete_file(path: str, owner_id: str | None = None):
+    return _workspace_call(_get_workspace_service().delete_file, path, owner_id=owner_id)
+
+
+@app.get("/api/workspace/trash")
+async def workspace_trash():
+    return _workspace_call(_get_workspace_service().list_trash)
+
+
+@app.post("/api/workspace/trash/{operation_id}/restore")
+async def workspace_restore_trash(operation_id: str):
+    return _workspace_call(_get_workspace_service().restore_trash, operation_id)
+
+
+@app.delete("/api/workspace/trash/{operation_id}")
+async def workspace_delete_trash(operation_id: str, request_data: dict):
+    return _workspace_call(
+        _get_workspace_service().permanently_delete_trash,
+        operation_id,
+        confirmed=request_data.get("confirm") is True,
+    )
+
+
+@app.post("/api/workspace/archive-reset")
+async def workspace_archive_reset(request_data: dict):
+    return _workspace_call(
+        _get_workspace_service().archive_reset,
+        confirmed=request_data.get("confirm") is True,
+        run_id=str(request_data.get("run_id", "manual")),
+    )
+
+
+@app.get("/api/workspace/history")
+async def workspace_history():
+    return _workspace_call(_get_workspace_service().list_history)
+
+
+@app.post("/api/workspace/history/{archive_id}/restore")
+async def workspace_restore_history(archive_id: str, request_data: dict):
+    return _workspace_call(
+        _get_workspace_service().restore_history,
+        archive_id,
+        confirmed=request_data.get("confirm") is True,
+    )
+
+
+@app.delete("/api/workspace/history/{archive_id}")
+async def workspace_delete_history(archive_id: str, request_data: dict):
+    return _workspace_call(
+        _get_workspace_service().permanently_delete_history,
+        archive_id,
+        confirmed=request_data.get("confirm") is True,
+    )
 
 
 @app.post("/api/chat/runs")

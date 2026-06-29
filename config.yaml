@@ -93,3 +93,16 @@ textgrad:
   eval_temperature: 0.1
   # Temperature for the updater LLM (low = faithful to gradient).
   update_temperature: 0.2
+
+workspace:
+  root: ".recurseforge"
+  active_dir: "workspace/current"
+  history_dir: "workspace-history"
+  trash_dir: "workspace-trash"
+  max_file_bytes: 1048576
+  max_workspace_bytes: 104857600
+  shared_history_tokens: 12000
+  max_passes: 3
+  max_tool_calls_per_pass: 40
+  max_helpers_per_pass: 4
+  python_timeout_s: 30
