@@ -162,6 +162,37 @@ class WorkspaceService:
                     })
             return {"files": files, "workspace_revision": self._workspace_revision}
 
+    @property
+    def workspace_revision(self) -> int:
+        with self._mutex:
+            return self._workspace_revision
+
+    def snapshot_to(self, destination: Path) -> dict[str, Any]:
+        """Copy the active workspace into destination at one stable revision."""
+        with self._mutex:
+            destination = destination.resolve()
+            if destination.exists() and any(destination.iterdir()):
+                raise WorkspaceError("snapshot destination must be empty", code="snapshot_destination_not_empty")
+            destination.mkdir(parents=True, exist_ok=True)
+
+            files = []
+            for source in sorted(self.active.rglob("*")):
+                if source.is_symlink():
+                    raise WorkspaceError("symbolic links are not allowed", code="symlink_rejected")
+                if not source.is_file():
+                    continue
+                relative = source.relative_to(self.active)
+                target = destination / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+                files.append(relative.as_posix())
+
+            return {
+                "snapshot_path": str(destination),
+                "workspace_revision": self._workspace_revision,
+                "files": files,
+            }
+
     def read_file(self, relative_path: str) -> dict[str, Any]:
         with self._mutex:
             normalized, path = self._resolve(relative_path, allow_missing=False)

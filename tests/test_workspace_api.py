@@ -54,6 +54,31 @@ class WorkspaceApiTests(unittest.IsolatedAsyncioTestCase):
         history = await dashboard_server.workspace_history()
         self.assertEqual(history["archives"][0]["archive_id"], archived["archive_id"])
 
+    async def test_manifest_and_python_target_api_handlers(self):
+        created = await dashboard_server.workspace_create_file({
+            "path": "main.py",
+            "content": "print('api ok')",
+        })
+        await dashboard_server.workspace_create_file({
+            "path": "tests/test_smoke.py",
+            "content": "import unittest\n",
+        })
+        await dashboard_server.workspace_create_file({
+            "path": "recurseforge.json",
+            "content": (
+                '{"schema_version": 1, '
+                '"entrypoints": [{"id": "main", "kind": "script", "target": "main.py", "args": []}], '
+                '"tests": [{"id": "unit", "kind": "module", "target": "unittest", "args": ["discover", "-s", "tests"]}]}'
+            ),
+        })
+
+        manifest = await dashboard_server.workspace_manifest()
+        self.assertEqual(manifest["entrypoints"][0]["id"], "main")
+        result = await dashboard_server.workspace_run_python_target({"target_id": "main"})
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["stdout"], "api ok\n")
+        self.assertEqual((await dashboard_server.workspace_read_file("main.py"))["revision"], created["revision"])
+
 
 if __name__ == "__main__":
     unittest.main()

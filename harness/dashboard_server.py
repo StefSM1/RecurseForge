@@ -267,6 +267,30 @@ def _get_workspace_service():
     return _workspace_service
 
 
+def _get_workspace_execution_service():
+    from harness.workspace_execution import (
+        WorkspaceExecutionService,
+        WorkspaceExecutionSettings,
+        default_workspace_python,
+    )
+
+    config = _load_dashboard_config().get("workspace", {})
+    python_path = config.get("python_executable")
+    if python_path:
+        python_executable = Path(python_path)
+        if not python_executable.is_absolute():
+            python_executable = _PROJECT_ROOT / python_executable
+    else:
+        python_executable = default_workspace_python(_PROJECT_ROOT)
+    return WorkspaceExecutionService(
+        _get_workspace_service(),
+        WorkspaceExecutionSettings(
+            python_executable=python_executable,
+            timeout_s=int(config.get("python_timeout_s", 30)),
+        ),
+    )
+
+
 def _workspace_call(operation, *args, **kwargs):
     from harness.workspace_service import WorkspaceError
 
@@ -357,6 +381,19 @@ async def workspace_archive_reset(request_data: dict):
 @app.get("/api/workspace/history")
 async def workspace_history():
     return _workspace_call(_get_workspace_service().list_history)
+
+
+@app.get("/api/workspace/manifest")
+async def workspace_manifest():
+    return _workspace_call(_get_workspace_execution_service().load_manifest)
+
+
+@app.post("/api/workspace/python-target")
+async def workspace_run_python_target(request_data: dict):
+    return _workspace_call(
+        _get_workspace_execution_service().run_python_target,
+        str(request_data.get("target_id", "")),
+    )
 
 
 @app.post("/api/workspace/history/{archive_id}/restore")
