@@ -20,6 +20,8 @@ class DashboardChatTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         with dashboard_server._chat_runs_lock:
             dashboard_server._chat_runs.clear()
+        dashboard_server._main_chat_history = None
+        dashboard_server._workspace_agent_service = None
 
     async def test_start_chat_run_rejects_empty_message(self):
         with self.assertRaises(HTTPException) as ctx:
@@ -31,6 +33,7 @@ class DashboardChatTests(unittest.IsolatedAsyncioTestCase):
             response = await dashboard_server.start_chat_run({"message": "Solve it"})
 
         self.assertEqual(response["prompt"], "Solve it")
+        self.assertEqual(response["mode"], "chat")
         self.assertEqual(response["status"], "pending")
         self.assertTrue(response["run_id"].startswith("chat-"))
         with dashboard_server._chat_runs_lock:
@@ -97,13 +100,7 @@ class DashboardChatTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Sandbox exit: 0", output)
         self.assertIn("stdout:\nok", output)
 
-    def test_run_chat_graph_stores_final_output_with_mocked_graph(self):
-        class FakeGraph:
-            def invoke(self, state):
-                self.state = state
-                return {"status": "done", "direct_answer": "Mocked final"}
-
-        fake_graph = FakeGraph()
+    def test_run_chat_dispatches_direct_mode_without_recursive_graph(self):
         with dashboard_server._chat_runs_lock:
             dashboard_server._chat_runs["chat-run"] = {
                 "run_id": "chat-run",
@@ -118,14 +115,27 @@ class DashboardChatTests(unittest.IsolatedAsyncioTestCase):
             }
 
         with patch.object(dashboard_server, "_load_dashboard_config", return_value={}), \
-                patch("engine.graph.build_graph", return_value=fake_graph):
+                patch.object(dashboard_server, "_run_direct_chat", return_value={
+                    "status": "success", "final_output": "Mocked final",
+                }) as direct, \
+                patch("engine.graph.build_graph") as recursive_graph:
             dashboard_server._run_chat_graph("chat-run", "Task")
 
         with dashboard_server._chat_runs_lock:
             record = dashboard_server._chat_runs["chat-run"]
         self.assertEqual(record["status"], "success")
         self.assertEqual(record["final_output"], "Mocked final")
-        self.assertEqual(fake_graph.state["run_id"], "chat-run")
+        direct.assert_called_once()
+        recursive_graph.assert_not_called()
+
+    async def test_workspace_mode_is_recorded_and_exposes_additive_fields(self):
+        with patch.object(dashboard_server.threading, "Thread", FakeThread):
+            response = await dashboard_server.start_chat_run({
+                "message": "Build it", "mode": "workspace_agent",
+            })
+        self.assertEqual(response["mode"], "workspace_agent")
+        self.assertIn("changed_files", response)
+        self.assertIn("completion_state", response)
 
 
 if __name__ == "__main__":

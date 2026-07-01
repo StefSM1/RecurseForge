@@ -56,6 +56,8 @@ _dashboard_started_bus = False
 _chat_runs_lock = threading.Lock()
 _chat_runs: dict[str, dict[str, Any]] = {}
 _workspace_service = None
+_workspace_agent_service = None
+_main_chat_history = None
 
 
 # ---------------------------------------------------------------------------
@@ -416,10 +418,13 @@ async def workspace_delete_history(archive_id: str, request_data: dict):
 
 @app.post("/api/chat/runs")
 async def start_chat_run(request_data: dict):
-    """Start one dashboard-owned recursive agent run from the chat panel."""
+    """Start one direct-chat or Workspace Agent run from the chat panel."""
     message = str(request_data.get("message", "")).strip()
     if not message:
         raise HTTPException(status_code=400, detail="message is required")
+    mode = str(request_data.get("mode", "chat")).strip().lower()
+    if mode not in {"chat", "workspace_agent"}:
+        raise HTTPException(status_code=400, detail="mode must be 'chat' or 'workspace_agent'")
 
     with _chat_runs_lock:
         active = [
@@ -436,6 +441,7 @@ async def start_chat_run(request_data: dict):
         record = {
             "run_id": run_id,
             "prompt": message,
+            "mode": mode,
             "status": "pending",
             "created_at": time.time(),
             "started_at": None,
@@ -443,12 +449,16 @@ async def start_chat_run(request_data: dict):
             "final_output": None,
             "error": None,
             "stop_requested": False,
+            "pass": None,
+            "changed_files": [],
+            "tests": [],
+            "completion_state": None,
         }
         _chat_runs[run_id] = record
 
     thread = threading.Thread(
         target=_run_chat_graph,
-        args=(run_id, message),
+        args=(run_id, message, mode),
         daemon=True,
         name="dashboard-chat-{}".format(run_id[:13]),
     )
@@ -573,6 +583,7 @@ def _public_chat_run(record: dict[str, Any]) -> dict[str, Any]:
     return {
         "run_id": record["run_id"],
         "prompt": record["prompt"],
+        "mode": record.get("mode", "chat"),
         "status": record["status"],
         "created_at": record["created_at"],
         "started_at": record["started_at"],
@@ -580,6 +591,10 @@ def _public_chat_run(record: dict[str, Any]) -> dict[str, Any]:
         "final_output": record["final_output"],
         "error": record["error"],
         "stop_requested": record["stop_requested"],
+        "pass": record.get("pass"),
+        "changed_files": record.get("changed_files", []),
+        "tests": record.get("tests", []),
+        "completion_state": record.get("completion_state"),
     }
 
 
@@ -646,16 +661,73 @@ def _format_chat_output(result: dict[str, Any]) -> str:
     return "\n".join(lines).strip()
 
 
-def _run_chat_graph(run_id: str, prompt: str) -> None:
-    """Invoke the existing recursive graph for a chat-submitted prompt."""
+def _get_main_chat_history():
+    global _main_chat_history
+    if _main_chat_history is None:
+        from harness.workspace_agent import SharedChatHistory
+
+        tokens = int(_load_dashboard_config().get("workspace", {}).get("shared_history_tokens", 12000))
+        _main_chat_history = SharedChatHistory(tokens)
+    return _main_chat_history
+
+
+def _run_was_canceled(run_id: str) -> bool:
+    with _chat_runs_lock:
+        return bool(_chat_runs.get(run_id, {}).get("stop_requested"))
+
+
+def _get_workspace_agent_service():
+    global _workspace_agent_service
+    if _workspace_agent_service is None:
+        from harness.workspace_agent import WorkspaceAgentService
+
+        _workspace_agent_service = WorkspaceAgentService(
+            _get_workspace_service(),
+            _get_workspace_execution_service(),
+            _load_dashboard_config(),
+            history=_get_main_chat_history(),
+            cancel_check=_run_was_canceled,
+        )
+    return _workspace_agent_service
+
+
+def _run_direct_chat(run_id: str, prompt: str, config: dict[str, Any]) -> dict[str, Any]:
+    """Call Qwen directly without constructing workspace or recursive services."""
+    from engine.llm_client import chat_completion, get_client
+
+    if _run_was_canceled(run_id):
+        return {"status": "canceled", "final_output": None}
+    llm = config.get("llm", {})
+    history = _get_main_chat_history()
+    answer = chat_completion(
+        get_client(str(llm.get("base_url", "http://localhost:8080/v1"))),
+        str(llm.get("model_name", "qwen")),
+        [
+            {"role": "system", "content": "Answer the user directly and concisely."},
+            *history.messages_with_user(prompt),
+        ],
+        max_tokens=int(llm.get("max_tokens", 8192)),
+        temperature=float(llm.get("temperature", 0.3)),
+        call_kind="dashboard_direct_chat",
+        context_config=config,
+    )
+    if _run_was_canceled(run_id):
+        return {"status": "canceled", "final_output": None}
+    history.append_exchange(prompt, answer)
+    return {"status": "success", "final_output": answer}
+
+
+def _run_chat_graph(run_id: str, prompt: str, mode: str = "chat") -> None:
+    """Dispatch a dashboard request to direct Chat or the Workspace Agent cycle."""
     _set_chat_run(run_id, status="running", started_at=time.time())
     try:
-        from engine.graph import build_graph
-
         config = _load_dashboard_config()
-        graph = build_graph(config)
-        result = graph.invoke(_initial_graph_state(run_id, prompt, config))
-        output = _format_chat_output(result)
+        if mode == "workspace_agent":
+            result = _get_workspace_agent_service().run_workspace(run_id, prompt)
+            output = result.get("final_summary")
+        else:
+            result = _run_direct_chat(run_id, prompt, config)
+            output = result.get("final_output")
 
         with _chat_runs_lock:
             record = _chat_runs.get(run_id)
@@ -666,8 +738,13 @@ def _run_chat_graph(run_id: str, prompt: str) -> None:
                 record["status"] = "stopped"
                 record["final_output"] = None
             else:
-                record["status"] = "success" if result.get("status") == "done" else "failed"
+                completion = str(result.get("status") or "failed")
+                record["status"] = "success" if completion == "success" else completion
                 record["final_output"] = output
+                record["pass"] = result.get("pass_number")
+                record["changed_files"] = result.get("changed_files", [])
+                record["tests"] = result.get("test_results", [])
+                record["completion_state"] = completion
     except Exception as exc:
         logger.exception("[Dashboard] Chat run %s failed", run_id)
         with _chat_runs_lock:

@@ -20,7 +20,6 @@ import os
 import sys
 from pathlib import Path
 
-import tiktoken
 import tree_sitter_python as tspython
 import tree_sitter_javascript as tsjavascript
 from fastapi import FastAPI, HTTPException
@@ -32,6 +31,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from engine.interfaces import ContextRequest, ContextPayload
+from engine.context_governor import count_text_tokens
 
 logger = logging.getLogger("recurseforge.context.repo_map")
 
@@ -44,11 +44,9 @@ SKIP_DIRS = {
     ".tox", ".mypy_cache", ".pytest_cache", "dist", "build",
 }
 
-_encoder = tiktoken.get_encoding("cl100k_base")
-
-
 def count_tokens(text: str) -> int:
-    return len(_encoder.encode(text))
+    """Use the project's offline conservative estimator for map budgets."""
+    return count_text_tokens(text)
 
 
 class SymbolInfo:

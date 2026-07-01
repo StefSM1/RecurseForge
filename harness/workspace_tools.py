@@ -153,7 +153,16 @@ WORKSPACE_TOOL_SCHEMAS: list[dict[str, Any]] = [
 
 
 READ_ONLY_TOOLS = {"list_workspace", "view_file", "search_workspace"}
+DEBUG_TOOLS = READ_ONLY_TOOLS | {"run_python_target"}
 MUTATION_TOOLS = {"create_file", "edit_file", "delete_file"}
+
+
+def tool_schemas_for(names: set[str]) -> list[dict[str, Any]]:
+    """Return only the native function schemas allowed for one agent role."""
+    return [
+        schema for schema in WORKSPACE_TOOL_SCHEMAS
+        if schema.get("function", {}).get("name") in names
+    ]
 
 
 @dataclass(frozen=True)
@@ -181,6 +190,7 @@ class WorkspaceToolRuntime:
         helper_callback: Callable[[str, list[str]], dict[str, Any]] | None = None,
         cancel_check: Callable[[], bool] | None = None,
         read_only: bool = False,
+        allowed_tools: set[str] | None = None,
     ):
         self.workspace = workspace
         self.executor = executor
@@ -192,6 +202,7 @@ class WorkspaceToolRuntime:
         self.helper_callback = helper_callback
         self.cancel_check = cancel_check or (lambda: False)
         self.read_only = read_only
+        self.allowed_tools = set(allowed_tools) if allowed_tools is not None else None
         self.tool_calls_used = 0
         self.helpers_used = 0
         self.finished = False
@@ -201,8 +212,11 @@ class WorkspaceToolRuntime:
         args = self._parse_arguments(arguments)
         self._check_canceled()
         self._reserve_tool_call()
-        if self.read_only and name not in READ_ONLY_TOOLS:
-            raise WorkspaceError("helper runtimes may only use read-only tools", code="tool_denied", status=403)
+        effective_allowed = self.allowed_tools
+        if effective_allowed is None and self.read_only:
+            effective_allowed = READ_ONLY_TOOLS
+        if effective_allowed is not None and name not in effective_allowed:
+            raise WorkspaceError("tool is not allowed for this agent stage", code="tool_denied", status=403)
 
         tool_run_id = str(uuid4())
         path = str(args.get("path") or "") or None
@@ -251,11 +265,20 @@ class WorkspaceToolRuntime:
         max_tokens: int = 8192,
         temperature: float = 0.2,
         context_config: dict[str, Any] | None = None,
+        tool_schemas: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Run a native tool-call loop until finish_worker or no tool calls."""
         transcript = list(messages)
+        model_turns = 0
         while not self.finished:
             self._check_canceled()
+            model_turns += 1
+            if model_turns > self.settings.max_tool_calls + 4:
+                raise WorkspaceError(
+                    "model turn budget exceeded without completion",
+                    code="tool_budget_exceeded",
+                    status=429,
+                )
             assistant = chat_completion_message(
                 client=client,
                 model=model,
@@ -264,7 +287,7 @@ class WorkspaceToolRuntime:
                 temperature=temperature,
                 call_kind="workspace_worker",
                 context_config=context_config,
-                tools=WORKSPACE_TOOL_SCHEMAS,
+                tools=tool_schemas or WORKSPACE_TOOL_SCHEMAS,
                 tool_choice="auto",
             )
             tool_calls = assistant.get("tool_calls", [])
